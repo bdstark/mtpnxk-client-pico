@@ -1,0 +1,17 @@
+/* otactl runtime slot (see otactl-boot-pico include/runtime_slot.h).
+ *
+ * The bootstrap owns flash offset 0 and chain-loads the runtime from
+ * RUNTIME_SLOT_OFFSET (0x100000). The slot is RUNTIME_SLOT_SIZE (0xF8000)
+ * long, with its last 4 KB sector reserved for the bootstrap's commit
+ * marker, so the image may use 0xF7000 bytes. The updater refuses any UF2
+ * block outside this window, so an image linked at flash base is rejected
+ * rather than written over the bootstrap.
+ *
+ * This file replaces the SDK's memory_flash.incl through
+ * pico_add_linker_script_override_path; everything else in the default
+ * link stays as shipped, including the 256-byte boot2 the bootstrap skips.
+ */
+MEMORY
+{
+    FLASH(rx) : ORIGIN = 0x10100000, LENGTH = 0xF7000
+}
