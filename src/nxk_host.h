@@ -31,4 +31,9 @@ bool nxk_host_connected(void);
 uint32_t nxk_host_packets(void);
 uint32_t nxk_host_dropped(void);
 
+// Queues an LED key-state write (vendor request 0x80, wValue = value,
+// wIndex = id) for core 1 to send on the control pipe. Returns false if the
+// keypad is absent or the queue is full.
+bool nxk_host_led_set(uint16_t id, uint16_t value);
+
 #endif

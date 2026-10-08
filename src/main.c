@@ -1,4 +1,4 @@
-// mtpnxk: ETC/Shell NX-K keypad bridge on a Raspberry Pi Pico W.
+// mtpnxk: Obsidian NX-K keypad bridge on a Raspberry Pi Pico W.
 //
 // Core 1 hosts the NX-K on a PIO USB port. Core 0 is a HID keyboard on the
 // native USB port towards the lighting PC, runs Wi-Fi for OSC, logs and
@@ -33,6 +33,27 @@
 #endif
 
 static config_t s_config;
+static bool s_leds_on;   // console 'l': every known LED lit
+static bool s_led_echo;  // console 'e': light a key while it is held
+
+// Encoder status LEDs sit at the encoders' press addresses.
+static const uint16_t s_encoder_led_ids[] = {0x5901, 0x5911, 0x5921, 0x5931};
+
+static void set_all_leds(uint16_t value)
+{
+    uint16_t ids[64];
+    size_t n = nxk_button_ids(ids, sizeof(ids) / sizeof(ids[0]));
+    unsigned queued = 0, failed = 0;
+    for (size_t i = 0; i < n; ++i)
+    {
+        nxk_host_led_set(ids[i], value) ? queued++ : failed++;
+    }
+    for (size_t i = 0; i < sizeof(s_encoder_led_ids) / sizeof(s_encoder_led_ids[0]); ++i)
+    {
+        nxk_host_led_set(s_encoder_led_ids[i], value) ? queued++ : failed++;
+    }
+    log_printf("leds: wrote 0x%04x to %u controls (%u not queued)", value, queued, failed);
+}
 
 static void print_status(void)
 {
@@ -43,11 +64,48 @@ static void print_status(void)
                (unsigned long)osc_sent(), (unsigned long)osc_dropped());
 }
 
+// 'L<id> <value>\n' writes one LED: hex control address and hex wValue,
+// e.g. "L5901 0100".
+static char s_line[32];
+static size_t s_line_len;
+static bool s_line_mode;
+
+static void console_line(const char *line)
+{
+    unsigned id = 0, value = 0;
+    if (sscanf(line, "%x %x", &id, &value) != 2 || id > 0xffff || value > 0xffff)
+    {
+        log_printf("console: expected L<id hex> <value hex>, got '%s'", line);
+        return;
+    }
+    bool ok = nxk_host_led_set((uint16_t)id, (uint16_t)value);
+    log_printf("leds: 0x%04x <- 0x%04x %s", id, value, ok ? "queued" : "NOT queued");
+}
+
 // Single-character bench console (UART and USB CDC).
 static void console_handle(int c)
 {
+    if (s_line_mode)
+    {
+        if (c == '\n' || c == '\r')
+        {
+            s_line[s_line_len] = '\0';
+            s_line_mode = false;
+            s_line_len = 0;
+            console_line(s_line);
+        }
+        else if (s_line_len < sizeof(s_line) - 1)
+        {
+            s_line[s_line_len++] = (char)c;
+        }
+        return;
+    }
     switch (c)
     {
+    case 'L':
+        s_line_mode = true;
+        s_line_len = 0;
+        break;
     case 's':
         print_status();
         break;
@@ -73,9 +131,20 @@ static void console_handle(int c)
         sleep_ms(50);
         reset_usb_boot(0, 0);
         break;
+    case 'l':
+        s_leds_on = !s_leds_on;
+        set_all_leds(s_leds_on ? NXK_LED_ON : NXK_LED_OFF);
+        break;
+    case 'e':
+        s_led_echo = !s_led_echo;
+        log_printf("leds: key echo %s", s_led_echo ? "on" : "off");
+        break;
+    case 'd':
+        console_replay();
+        break;
     case 'h':
     case '?':
-        log_printf("console: s=status c=config u=update(otactl) r=reboot b=bootsel");
+        log_printf("console: s=status c=config d=dump log l=all leds on/off L<id> <val>=one led e=led echo on/off u=update(otactl) r=reboot b=bootsel");
         break;
     default:
         break;
@@ -122,6 +191,17 @@ static void drain_nxk(void)
         else
         {
             log_printf("nxk: %s %s", evt.name, nxk_event_type_name(evt.type));
+        }
+        if (s_led_echo && evt.id != 0)
+        {
+            if (evt.type == NXK_EVENT_KEY_DOWN || evt.type == NXK_EVENT_PRESS_DOWN)
+            {
+                nxk_host_led_set(evt.id, NXK_LED_ON);
+            }
+            else if (evt.type == NXK_EVENT_KEY_UP || evt.type == NXK_EVENT_PRESS_UP)
+            {
+                nxk_host_led_set(evt.id, s_leds_on ? NXK_LED_ON : NXK_LED_OFF);
+            }
         }
         route_event(&evt);
     }

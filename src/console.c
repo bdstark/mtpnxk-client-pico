@@ -18,6 +18,11 @@ void console_init(console_handler_t handler)
     s_cdc_sent = 0;
 }
 
+void console_replay(void)
+{
+    s_cdc_sent = 0;
+}
+
 static void mirror_log_to_cdc(void)
 {
     if (!tud_cdc_connected())

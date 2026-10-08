@@ -103,6 +103,7 @@ bool nxk_decode(const uint8_t *data, size_t len, nxk_event_t *out)
     out->type = NXK_EVENT_UNKNOWN;
     out->name = NULL;
     out->delta = 0;
+    out->id = 0;
 
     if (len == 0)
     {
@@ -115,6 +116,7 @@ bool nxk_decode(const uint8_t *data, size_t len, nxk_event_t *out)
         uint8_t control_id = data[2];
         uint8_t group_id = data[3];
         uint8_t state = data[4];
+        out->id = NXK_CONTROL_ID(group_id, control_id);
 
         if (event_class == 2 && group_id == 89)
         {
@@ -143,6 +145,7 @@ bool nxk_decode(const uint8_t *data, size_t len, nxk_event_t *out)
     if (len == 7 && data[0] == 2 && data[1] == 66 && data[3] == 89)
     {
         const char *name = encoder_rotate_name(data[2]);
+        out->id = NXK_CONTROL_ID(data[3], data[2]);
         if (name != NULL)
         {
             out->type = NXK_EVENT_ROTATE;
@@ -153,6 +156,16 @@ bool nxk_decode(const uint8_t *data, size_t len, nxk_event_t *out)
     }
 
     return true;
+}
+
+size_t nxk_button_ids(uint16_t *out, size_t max)
+{
+    size_t n = sizeof(s_buttons) / sizeof(s_buttons[0]);
+    for (size_t i = 0; i < n && i < max; ++i)
+    {
+        out[i] = NXK_CONTROL_ID(s_buttons[i].group_id, s_buttons[i].control_id);
+    }
+    return n;
 }
 
 const char *nxk_event_type_name(nxk_event_type_t type)

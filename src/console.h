@@ -9,4 +9,8 @@ typedef void (*console_handler_t)(int c);
 void console_init(console_handler_t handler);
 void console_task(void);
 
+// Re-sends the whole log ring buffer to the USB serial port (console 'd'),
+// for terminals that attached after boot.
+void console_replay(void);
+
 #endif

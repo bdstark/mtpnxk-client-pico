@@ -2,9 +2,10 @@
 
 Firmware for a Raspberry Pi Pico W that turns USB lighting control surfaces
 into something a grandMA3 PC understands, with no software on the PC. The
-first surface is the ETC/Shell **NX-K** keypad; the Martin **M-Touch** and
-**M-Play** (see the MTouchPlay protocol notes) are the planned next ones,
-hence the name.
+first surface is the Obsidian Control Systems (Elation) **NX-K** ONYX
+keypad; the Martin **M-Touch** and **M-Play** (see the MTouchPlay protocol
+notes) are the planned next ones, hence the name. All three share one USB
+protocol family (vendor 0x11BE), documented in MTouchPlay `docs/protocol.md`.
 
 It runs as an [otactl](https://github.com/bdstark/otactl) runtime app: the
 otactl bootstrap on the Pico owns Wi-Fi provisioning, device identity and
@@ -35,6 +36,34 @@ NX-K keypad ──USB──▶ PIO USB host (core 1) ──queue──▶ decode
 Wi-Fi carries OSC, logs and the otactl update handoff. Keystrokes never
 depend on it.
 
+### NX-K LEDs
+
+Verified on hardware 2026-10-08. The NX-K speaks the M-Touch protocol: the
+host selects interface 0 alternate setting 1, which exposes only interrupt
+IN 0x82, and drives LEDs with vendor control requests on EP0
+(`bmRequestType 0x40, bRequest 0x80, wValue = state, wIndex = control
+address, wLength 0`). The control address is the one the keypad reports:
+group in the high byte, control in the low byte (Record 0x5401, Edit
+0x5101, HighLight 0x6001, Last 0x6401, Next 0x6402, the same numbers as on
+the M-Touch). Encoder LEDs are at the press addresses 0x5901, 0x5911,
+0x5921, 0x5931.
+
+Every LED is single-colour (blue, except Link which is red) and uses only
+the M-Touch green lane:
+
+| wValue | result |
+| ------ | ------ |
+| 0x0000 | off |
+| 0x0001 | on |
+| 0x0011 | blink (bit 4 alone does nothing) |
+| 0x0021 | off (bit 5 forces off, as on the M-Touch) |
+
+Bits 1, 2, 6 and 8 have no effect. The keypad keys (digits, `.`, `/`, `-`,
+`+`, `@`, `Enter`, `Thru`, `Full`) have no LED. The keypad keeps its LED
+state while VBUS stays up, including across a Pico reboot. The firmware
+does not yet drive LEDs in normal operation; the console commands below
+exist for the bench.
+
 ## Hardware
 
 - Raspberry Pi Pico W. (Not the Pico 2 W yet: the TinyUSB bundled with Pico
@@ -54,7 +83,11 @@ depend on it.
 
   D+ and D- must be consecutive GPIOs (`MTPNXK_PIO_USB_DP_PIN` selects D+).
   Pico-PIO-USB enables the host pull-downs internally. GP0/GP1 stay free for
-  UART0, which carries the log and a one-key bench console (`h` for help).
+  UART0, which carries the log and a one-key bench console (`h` for help),
+  also available on the USB serial port: `s` status, `c` config, `d` replay
+  the log ring buffer, `l` all NX-K LEDs on/off, `L<id> <val>` one LED
+  (hex, e.g. `L5101 0011`), `e` light a key while held, `u` otactl update,
+  `r` reboot, `b` BOOTSEL.
 - The system clock runs at 240 MHz with the core at 1.15 V. Pico-PIO-USB
   needs a multiple of 12 MHz, and its examples use 120 MHz, but at 120 MHz the
   PIO bit-clock dividers are fractional and the NX-K does not get through
@@ -173,7 +206,7 @@ CMakeLists.txt            build, options, otactl slot switch
 ld/otactl-slot/           linker override placing FLASH at the runtime slot
 lib/Pico-PIO-USB/         submodule (0.7.2), the PIO USB host
 src/main.c                core 0 loop, start-up order, bench console
-src/nxk_host.c            core 1: PIO host, NX-K enumeration, raw endpoint reads
+src/nxk_host.c            core 1: PIO host, NX-K enumeration, raw endpoint reads, LED writes
 src/nxk_decode.c          NX-K packet decoder (port of avrsvc cmd/nxk/decode.go)
 src/route.c               keypad -> HID, everything else -> OSC (port of publisher.go/osc.go)
 src/hid_kbd.c             keyboard report queue and device callbacks

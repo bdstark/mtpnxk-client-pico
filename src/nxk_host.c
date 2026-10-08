@@ -14,8 +14,18 @@
 #endif
 
 #define NXK_QUEUE_DEPTH 64
+#define NXK_LED_QUEUE_DEPTH 128
+
+typedef struct
+{
+    uint16_t id;
+    uint16_t value;
+} nxk_led_req_t;
 
 static queue_t s_queue;
+static queue_t s_led_queue;
+static volatile bool s_led_busy;
+static tusb_control_request_t s_led_setup; // must outlive the transfer
 static volatile bool s_ready;
 static volatile bool s_connected;
 static volatile uint32_t s_packets;
@@ -32,6 +42,63 @@ CFG_TUH_MEM_SECTION CFG_TUH_MEM_ALIGN static uint8_t s_in_buf[NXK_PACKET_MAX];
 void nxk_host_init(void)
 {
     queue_init(&s_queue, sizeof(nxk_packet_t), NXK_QUEUE_DEPTH);
+    queue_init(&s_led_queue, sizeof(nxk_led_req_t), NXK_LED_QUEUE_DEPTH);
+}
+
+bool nxk_host_led_set(uint16_t id, uint16_t value)
+{
+    if (!s_connected)
+    {
+        return false;
+    }
+    nxk_led_req_t req = {.id = id, .value = value};
+    return queue_try_add(&s_led_queue, &req);
+}
+
+// LED writes: one vendor control request in flight at a time, drained from
+// the core 1 loop between tuh_task() calls.
+static void led_complete(tuh_xfer_t *xfer)
+{
+    if (xfer->result != XFER_RESULT_SUCCESS)
+    {
+        log_printf("nxk host: LED write 0x%04x=0x%04x failed (result %u)", xfer->setup->wIndex, xfer->setup->wValue,
+                   (unsigned)xfer->result);
+    }
+    s_led_busy = false;
+}
+
+static void led_pump(void)
+{
+    if (s_led_busy || !s_connected)
+    {
+        return;
+    }
+    nxk_led_req_t req;
+    if (!queue_try_remove(&s_led_queue, &req))
+    {
+        return;
+    }
+    s_led_setup = (tusb_control_request_t){
+        .bmRequestType_bit = {.recipient = TUSB_REQ_RCPT_DEVICE, .type = TUSB_REQ_TYPE_VENDOR, .direction = TUSB_DIR_OUT},
+        .bRequest = 0x80,
+        .wValue = tu_htole16(req.value),
+        .wIndex = tu_htole16(req.id),
+        .wLength = 0,
+    };
+    tuh_xfer_t xfer = {
+        .daddr = s_daddr,
+        .ep_addr = 0,
+        .setup = &s_led_setup,
+        .buffer = NULL,
+        .complete_cb = led_complete,
+        .user_data = 0,
+    };
+    s_led_busy = true;
+    if (!tuh_control_xfer(&xfer))
+    {
+        log_printf("nxk host: LED write 0x%04x could not be queued", req.id);
+        s_led_busy = false;
+    }
 }
 
 void nxk_host_core1_main(void)
@@ -51,6 +118,7 @@ void nxk_host_core1_main(void)
     while (true)
     {
         tuh_task();
+        led_pump();
     }
 }
 
@@ -150,6 +218,8 @@ static bool find_endpoint(const uint8_t *desc, uint16_t total_len)
     const uint8_t *end = desc + total_len;
     bool in_target_itf = false;
 
+    bool found = false;
+
     // Skip the configuration descriptor itself.
     p += tu_desc_len(p);
     while (p < end)
@@ -159,19 +229,24 @@ static bool find_endpoint(const uint8_t *desc, uint16_t total_len)
         {
             const tusb_desc_interface_t *itf = (const tusb_desc_interface_t *)p;
             in_target_itf = itf->bInterfaceNumber == NXK_INTERFACE && itf->bAlternateSetting == NXK_ALT_SETTING;
+            log_printf("nxk host: interface %u alt %u class %02x/%02x/%02x, %u endpoints", itf->bInterfaceNumber,
+                       itf->bAlternateSetting, itf->bInterfaceClass, itf->bInterfaceSubClass, itf->bInterfaceProtocol,
+                       itf->bNumEndpoints);
         }
-        else if (type == TUSB_DESC_ENDPOINT && in_target_itf)
+        else if (type == TUSB_DESC_ENDPOINT)
         {
             const tusb_desc_endpoint_t *ep = (const tusb_desc_endpoint_t *)p;
-            if (ep->bEndpointAddress == NXK_ENDPOINT_IN)
+            log_printf("nxk host:   endpoint 0x%02x type %u max %u interval %u", ep->bEndpointAddress,
+                       ep->bmAttributes.xfer, (unsigned)tu_edpt_packet_size(ep), ep->bInterval);
+            if (in_target_itf && ep->bEndpointAddress == NXK_ENDPOINT_IN && !found)
             {
                 memcpy(&s_ep_desc, ep, sizeof(s_ep_desc));
-                return true;
+                found = true;
             }
         }
         p = tu_desc_next(p);
     }
-    return false;
+    return found;
 }
 
 static void config_desc_complete(tuh_xfer_t *xfer)
