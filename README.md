@@ -91,7 +91,22 @@ Options (`-D...` at configure time):
 
 A **standalone** build (`-DMTPNXK_OTACTL_SLOT=OFF`) links at flash base,
 takes Wi-Fi from the CMake cache, and can be dragged onto a bare Pico W in
-BOOTSEL mode for bench work without the bootstrap.
+BOOTSEL mode for bench work without the bootstrap. Put bench credentials in
+a git-ignored `build_config.cmake` next to `CMakeLists.txt` rather than on
+the command line:
+
+```cmake
+set(MTPNXK_WIFI_SSID "mynet" CACHE STRING "" FORCE)
+set(MTPNXK_WIFI_PASSWORD "secret" CACHE STRING "" FORCE)
+set(MTPNXK_OSC_HOST "192.168.1.50" CACHE STRING "" FORCE)
+```
+
+Reflashing a running board on a Linux bench host, no BOOTSEL needed
+(the vendor product id needs sudo unless a udev rule covers 2e8a:104e):
+
+```bash
+sudo picotool reboot -u --vid 11914 --pid 4174 -f && sleep 2 && picotool load -x build-standalone/mtpnxk.uf2
+```
 
 ## otactl integration
 
@@ -126,8 +141,9 @@ this is the first runtime app.
 Things that compile but have not run on hardware yet, in the order to test:
 
 1. Console on the USB serial port (or UART0); `s` prints counters. Done.
-2. HID keyboard enumerates on the PC (done on Linux); `Thru` types text
-   with ShCuts on (still to verify on the gMA3 PC).
+2. HID keyboard enumerates on the PC and keypad presses arrive as keypad
+   usages, `Thru` as typed text. Done on Linux 2026-10-08; the gMA3
+   shortcut mapping itself is still to be verified on the lighting PC.
 3. NX-K enumerates on the PIO port (`usb host: device 11be:e102`), alt
    setting 1 is selected, packets arrive, keys decode. Done on 2026-10-08
    at 240 MHz (see Hardware): keys, encoder turns with velocity, and

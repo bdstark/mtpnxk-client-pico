@@ -18,6 +18,13 @@ pico_sdk_init()
 # ---------------------------------------------------------------------------
 # Build options
 # ---------------------------------------------------------------------------
+# Local, git-ignored overrides (bench Wi-Fi credentials, OSC target), e.g.
+#   set(MTPNXK_WIFI_SSID "mynet" CACHE STRING "" FORCE)
+#   set(MTPNXK_WIFI_PASSWORD "secret" CACHE STRING "" FORCE)
+include(${CMAKE_CURRENT_LIST_DIR}/build_config.cmake OPTIONAL RESULT_VARIABLE _mtpnxk_cfg)
+if (_mtpnxk_cfg)
+    message(STATUS "Loaded local overrides from build_config.cmake")
+endif()
 option(MTPNXK_OTACTL_SLOT
     "Link for the otactl runtime slot (flash offset 0x100000) and read Wi-Fi and options from the otactl flash store"
     ON)

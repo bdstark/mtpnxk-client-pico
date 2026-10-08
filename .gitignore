@@ -7,3 +7,4 @@ compile_commands.json
 *.hex
 *.dis
 *.map
+build_config.cmake
