@@ -129,11 +129,14 @@ static void drain_nxk(void)
 int main(void)
 {
     // Pico-PIO-USB needs the system clock to be a multiple of 12 MHz.
-    set_sys_clock_khz(120000, true);
+    bool clock_ok = set_sys_clock_khz(120000, true);
     stdio_init_all();
     log_init();
     log_printf("mtpnxk %s (%s) starting, otactl slot build: %d", MTPNXK_VERSION, MTPNXK_GIT_HASH,
                (int)MTPNXK_OTACTL_SLOT);
+    log_printf("clocks: set_sys_clock 120 MHz %s, clk_sys=%lu Hz clk_peri=%lu Hz clk_usb=%lu Hz", clock_ok ? "ok" : "FAILED",
+               (unsigned long)clock_get_hz(clk_sys), (unsigned long)clock_get_hz(clk_peri),
+               (unsigned long)clock_get_hz(clk_usb));
 
     config_load(&s_config);
     config_log(&s_config);

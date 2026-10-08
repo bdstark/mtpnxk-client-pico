@@ -16,7 +16,7 @@ extern "C" {
 #if MTPNXK_TUSB_DEBUG
 #define CFG_TUSB_DEBUG MTPNXK_TUSB_DEBUG
 #define CFG_TUH_LOG_LEVEL MTPNXK_TUSB_DEBUG
-#define CFG_TUD_LOG_LEVEL 1
+#define CFG_TUD_LOG_LEVEL 0
 int mtpnxk_tusb_printf(const char *fmt, ...);
 #define CFG_TUSB_DEBUG_PRINTF mtpnxk_tusb_printf
 #endif

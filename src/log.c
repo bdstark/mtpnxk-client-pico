@@ -68,7 +68,11 @@ int mtpnxk_tusb_printf(const char *fmt, ...)
         if (c == '\n' || len + 1 >= sizeof(line))
         {
             line[len] = '\0';
-            if (len > 0)
+            // Drop the device-side chatter: logging our own console writes
+            // would feed back into more console writes.
+            if (len > 0 && strncmp(line, "USBD", 4) != 0 && strncmp(line, "  Queue EP", 10) != 0 &&
+                strncmp(line, "  CDC", 5) != 0 && strncmp(line, "  HID", 5) != 0 && strncmp(line, "HID ", 4) != 0 &&
+                strncmp(line, "  Get Descriptor", 16) != 0 && strncmp(line, "  0000:", 7) != 0)
                 log_printf("tusb: %s", line);
             len = 0;
             continue;
