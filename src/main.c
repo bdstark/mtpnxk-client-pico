@@ -13,6 +13,7 @@
 #include "tusb.h"
 
 #include "config.h"
+#include "console.h"
 #include "hid_kbd.h"
 #include "log.h"
 #include "net.h"
@@ -40,14 +41,9 @@ static void print_status(void)
                (unsigned long)osc_sent(), (unsigned long)osc_dropped());
 }
 
-// Single-character bench console on the UART.
-static void console_poll(void)
+// Single-character bench console (UART and USB CDC).
+static void console_handle(int c)
 {
-    int c = getchar_timeout_us(0);
-    if (c == PICO_ERROR_TIMEOUT)
-    {
-        return;
-    }
     switch (c)
     {
     case 's':
@@ -128,6 +124,7 @@ int main(void)
     nxk_host_init();
     hid_kbd_init();
     route_init();
+    console_init(console_handle);
     multicore_reset_core1();
     multicore_launch_core1(nxk_host_core1_main);
     while (!nxk_host_ready())
@@ -146,7 +143,7 @@ int main(void)
         hid_kbd_task();
         net_task();
         drain_nxk();
-        console_poll();
+        console_task();
     }
     return 0;
 }

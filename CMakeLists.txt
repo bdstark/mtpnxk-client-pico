@@ -66,6 +66,8 @@ add_executable(mtpnxk
     src/route.c
     src/hid_kbd.c
     src/usb_descriptors.c
+    src/usb_reset.c
+    src/console.c
     src/osc.c
     src/net.c
     src/otactl_store.c
