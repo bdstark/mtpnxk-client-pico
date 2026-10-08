@@ -13,14 +13,15 @@ static uint32_t s_cdc_sent; // log lines already written to CDC
 void console_init(console_handler_t handler)
 {
     s_handler = handler;
-    s_cdc_sent = log_count();
+    // Start from zero so the first terminal to connect sees the whole
+    // start-up history still in the ring buffer.
+    s_cdc_sent = 0;
 }
 
 static void mirror_log_to_cdc(void)
 {
     if (!tud_cdc_connected())
     {
-        s_cdc_sent = log_count();
         return;
     }
     uint32_t count = log_count();

@@ -37,6 +37,7 @@ void nxk_host_init(void)
 void nxk_host_core1_main(void)
 {
     sleep_ms(10);
+    log_printf("usb host: core 1 up, PIO port D+ on GP%d", MTPNXK_PIO_USB_DP_PIN);
 
     pio_usb_configuration_t pio_cfg = PIO_USB_DEFAULT_CONFIG;
     pio_cfg.pin_dp = MTPNXK_PIO_USB_DP_PIN;

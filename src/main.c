@@ -73,6 +73,18 @@ static void console_handle(int c)
     }
 }
 
+// Keep the device stack and console alive for a while between stages.
+static void service_device_for_ms(uint32_t ms)
+{
+    absolute_time_t deadline = make_timeout_time_ms(ms);
+    while (!time_reached(deadline))
+    {
+        tud_task();
+        console_task();
+        sleep_ms(1);
+    }
+}
+
 static void drain_nxk(void)
 {
     nxk_packet_t pkt;
@@ -118,22 +130,41 @@ int main(void)
     config_load(&s_config);
     config_log(&s_config);
 
-    // USB first, on both cores: the PIO host claims its PIO state machines
-    // during tuh_init(), and the cyw43 driver claims its own afterwards, so
-    // the two never fight over a state machine.
-    nxk_host_init();
+    // Order matters:
+    //  1. Device stack on the native port first, so the USB console exists
+    //     even if everything after it hangs.
+    //  2. PIO host on core 1: tuh_init() claims its PIO state machines.
+    //  3. cyw43 last: it claims its own state machines after the host has
+    //     taken the ones it wants, so the two never fight.
     hid_kbd_init();
     route_init();
     console_init(console_handle);
+    tud_init(0);
+    log_printf("usb device: initialised, enumerating");
+
+    // Stage A: device only, so the console is up and mirroring before the
+    // riskier stages start. Long enough for a terminal to attach.
+    service_device_for_ms(4000);
+
+    // Stage B: PIO host on core 1.
+    log_printf("usb host: starting on core 1");
+    nxk_host_init();
     multicore_reset_core1();
     multicore_launch_core1(nxk_host_core1_main);
-    while (!nxk_host_ready())
+    absolute_time_t host_deadline = make_timeout_time_ms(3000);
+    while (!nxk_host_ready() && !time_reached(host_deadline))
     {
+        tud_task();
+        console_task();
         sleep_ms(1);
     }
-    tud_init(0);
+    log_printf("usb host: %s", nxk_host_ready() ? "initialised on core 1" : "NOT ready after 3 s, continuing without it");
+    service_device_for_ms(3000);
 
-    net_init(s_config.wifi_ssid, s_config.wifi_password);
+    // Stage C: Wi-Fi.
+    log_printf("net: starting cyw43");
+    bool net_ok = net_init(s_config.wifi_ssid, s_config.wifi_password);
+    log_printf("net: init %s", net_ok ? "ok" : "FAILED");
     osc_init(s_config.osc_host, s_config.osc_port);
 
     log_printf("ready");
