@@ -129,8 +129,10 @@ Things that compile but have not run on hardware yet, in the order to test:
 2. HID keyboard enumerates on the PC (done on Linux); `Thru` types text
    with ShCuts on (still to verify on the gMA3 PC).
 3. NX-K enumerates on the PIO port (`usb host: device 11be:e102`), alt
-   setting 1 is selected, packets arrive, keys decode. Done on 2026-10-08:
-   enumeration and endpoint reads work at 240 MHz (see Hardware).
+   setting 1 is selected, packets arrive, keys decode. Done on 2026-10-08
+   at 240 MHz (see Hardware): keys, encoder turns with velocity, and
+   encoder presses all decode. The keypad answers idle polls with
+   zero-length packets, which the reader skips, as the Go version did.
 4. Wi-Fi joins after the USB stacks are up. The cyw43 driver and
    Pico-PIO-USB both claim PIO state machines; the start-up order in
    `main.c` (host first, then cyw43) is what keeps them apart, and is the
