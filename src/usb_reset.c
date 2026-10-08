@@ -44,7 +44,9 @@ static bool resetd_control_xfer_cb(uint8_t rhport, uint8_t stage, tusb_control_r
     {
         return true;
     }
-    if (request->wIndex != USB_RESET_ITF_NUM || request->bmRequestType_bit.type != TUSB_REQ_TYPE_VENDOR)
+    // picotool issues these as class-type requests to the interface, so do
+    // not insist on the vendor type; the interface number is the selector.
+    if (request->wIndex != USB_RESET_ITF_NUM || request->bmRequestType_bit.type == TUSB_REQ_TYPE_STANDARD)
     {
         return false;
     }

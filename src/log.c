@@ -49,3 +49,31 @@ const char *log_line(uint32_t index)
 {
     return s_lines[index % LOG_MAX_LINES];
 }
+
+// TinyUSB debug output arrives in fragments; assemble into lines.
+int mtpnxk_tusb_printf(const char *fmt, ...)
+{
+    static char line[LOG_MAX_LINE_LEN];
+    static size_t len;
+    char buf[LOG_MAX_LINE_LEN];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    for (int i = 0; i < n && buf[i] != '\0'; ++i)
+    {
+        char c = buf[i];
+        if (c == '\r')
+            continue;
+        if (c == '\n' || len + 1 >= sizeof(line))
+        {
+            line[len] = '\0';
+            if (len > 0)
+                log_printf("tusb: %s", line);
+            len = 0;
+            continue;
+        }
+        line[len++] = c;
+    }
+    return n;
+}

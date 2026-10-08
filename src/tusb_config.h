@@ -8,6 +8,19 @@ extern "C" {
 // Common ---------------------------------------------------------------------
 #define CFG_TUSB_OS OPT_OS_PICO
 
+// Bring-up diagnostics: route TinyUSB's own log to the console ring buffer.
+// MTPNXK_TUSB_DEBUG is set from CMake; 0 in normal builds.
+#ifndef MTPNXK_TUSB_DEBUG
+#define MTPNXK_TUSB_DEBUG 0
+#endif
+#if MTPNXK_TUSB_DEBUG
+#define CFG_TUSB_DEBUG MTPNXK_TUSB_DEBUG
+#define CFG_TUH_LOG_LEVEL MTPNXK_TUSB_DEBUG
+#define CFG_TUD_LOG_LEVEL 1
+int mtpnxk_tusb_printf(const char *fmt, ...);
+#define CFG_TUSB_DEBUG_PRINTF mtpnxk_tusb_printf
+#endif
+
 // Device stack on the native controller (roothub port 0): the HID keyboard
 // the lighting PC sees.
 #define CFG_TUD_ENABLED 1

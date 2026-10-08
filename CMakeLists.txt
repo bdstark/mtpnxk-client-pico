@@ -26,6 +26,7 @@ set(MTPNXK_WIFI_SSID "" CACHE STRING "Bench Wi-Fi SSID (standalone builds, or fa
 set(MTPNXK_WIFI_PASSWORD "" CACHE STRING "Bench Wi-Fi password")
 set(MTPNXK_OSC_HOST "127.0.0.1" CACHE STRING "Default OSC target host (overridden by the otactl options form)")
 set(MTPNXK_OSC_PORT 8000 CACHE STRING "Default OSC target UDP port")
+set(MTPNXK_TUSB_DEBUG 0 CACHE STRING "TinyUSB log level routed to the console (0 off, 1 errors, 2 verbose); bring-up only")
 
 if (NOT EXISTS "${PICO_PIO_USB_PATH}/src/pio_usb.c")
     message(FATAL_ERROR "Pico-PIO-USB not found at ${PICO_PIO_USB_PATH}: run 'git submodule update --init'")
@@ -82,6 +83,7 @@ target_compile_definitions(mtpnxk PRIVATE
     MTPNXK_WIFI_PASSWORD="${MTPNXK_WIFI_PASSWORD}"
     MTPNXK_OSC_HOST="${MTPNXK_OSC_HOST}"
     MTPNXK_OSC_PORT=${MTPNXK_OSC_PORT}
+    MTPNXK_TUSB_DEBUG=${MTPNXK_TUSB_DEBUG}
     MTPNXK_VERSION="${MTPNXK_VERSION}"
     MTPNXK_GIT_HASH="${MTPNXK_GIT_HASH}"
     CYW43_HOST_NAME="mtpnxk"
