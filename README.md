@@ -55,7 +55,12 @@ depend on it.
   D+ and D- must be consecutive GPIOs (`MTPNXK_PIO_USB_DP_PIN` selects D+).
   Pico-PIO-USB enables the host pull-downs internally. GP0/GP1 stay free for
   UART0, which carries the log and a one-key bench console (`h` for help).
-- The system clock runs at 120 MHz, a multiple of the 12 MHz PIO-USB needs.
+- The system clock runs at 240 MHz with the core at 1.15 V. Pico-PIO-USB
+  needs a multiple of 12 MHz, and its examples use 120 MHz, but at 120 MHz the
+  PIO bit-clock dividers are fractional and the NX-K does not get through
+  enumeration: the first descriptor read ends in a STALL, or SET_ADDRESS is
+  acknowledged but never adopted. At 240 MHz the dividers are integers and it
+  enumerates first time. `MTPNXK_SYS_CLOCK_KHZ` overrides it.
 
 ## Building
 
@@ -81,6 +86,8 @@ Options (`-D...` at configure time):
 | `MTPNXK_PIO_USB_DP_PIN`  | `16`        | GPIO for host D+ (D- is the next one)                                   |
 | `MTPNXK_WIFI_SSID` / `_PASSWORD` | empty | Bench credentials; also the fallback when the store has none        |
 | `MTPNXK_OSC_HOST` / `_PORT` | `127.0.0.1` / `8000` | Default OSC target; the otactl options form overrides it     |
+| `MTPNXK_SYS_CLOCK_KHZ`   | `240000`    | System clock; see Hardware for why not 120 MHz                          |
+| `MTPNXK_TUSB_DEBUG`      | `0`         | TinyUSB log level routed to the console (bring-up only)                 |
 
 A **standalone** build (`-DMTPNXK_OTACTL_SLOT=OFF`) links at flash base,
 takes Wi-Fi from the CMake cache, and can be dragged onto a bare Pico W in
@@ -118,10 +125,12 @@ this is the first runtime app.
 
 Things that compile but have not run on hardware yet, in the order to test:
 
-1. UART log and console on GP0/GP1; `s` prints counters.
-2. HID keyboard enumerates on the PC; `Thru` types text with ShCuts on.
+1. Console on the USB serial port (or UART0); `s` prints counters. Done.
+2. HID keyboard enumerates on the PC (done on Linux); `Thru` types text
+   with ShCuts on (still to verify on the gMA3 PC).
 3. NX-K enumerates on the PIO port (`usb host: device 11be:e102`), alt
-   setting 1 is selected, packets arrive, keys decode.
+   setting 1 is selected, packets arrive, keys decode. Done on 2026-10-08:
+   enumeration and endpoint reads work at 240 MHz (see Hardware).
 4. Wi-Fi joins after the USB stacks are up. The cyw43 driver and
    Pico-PIO-USB both claim PIO state machines; the start-up order in
    `main.c` (host first, then cyw43) is what keeps them apart, and is the

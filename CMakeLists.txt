@@ -26,6 +26,13 @@ set(MTPNXK_WIFI_SSID "" CACHE STRING "Bench Wi-Fi SSID (standalone builds, or fa
 set(MTPNXK_WIFI_PASSWORD "" CACHE STRING "Bench Wi-Fi password")
 set(MTPNXK_OSC_HOST "127.0.0.1" CACHE STRING "Default OSC target host (overridden by the otactl options form)")
 set(MTPNXK_OSC_PORT 8000 CACHE STRING "Default OSC target UDP port")
+# 240 MHz, not the 120 MHz the Pico-PIO-USB examples use: at 120 MHz the PIO
+# bit clock dividers are fractional (120/48 = 2.5) and the NX-K would not
+# complete enumeration (STALL on the first descriptor read, or SET_ADDRESS
+# acknowledged but never adopted). At 240 MHz the dividers are integers and
+# the keypad enumerates first time. The core voltage is raised to 1.15 V for
+# anything above 133 MHz.
+set(MTPNXK_SYS_CLOCK_KHZ 240000 CACHE STRING "System clock in kHz; multiple of 12000 for PIO-USB; 240000 needed for the NX-K")
 set(MTPNXK_TUSB_DEBUG 0 CACHE STRING "TinyUSB log level routed to the console (0 off, 1 errors, 2 verbose); bring-up only")
 
 if (NOT EXISTS "${PICO_PIO_USB_PATH}/src/pio_usb.c")
@@ -84,6 +91,7 @@ target_compile_definitions(mtpnxk PRIVATE
     MTPNXK_OSC_HOST="${MTPNXK_OSC_HOST}"
     MTPNXK_OSC_PORT=${MTPNXK_OSC_PORT}
     MTPNXK_TUSB_DEBUG=${MTPNXK_TUSB_DEBUG}
+    MTPNXK_SYS_CLOCK_KHZ=${MTPNXK_SYS_CLOCK_KHZ}
     MTPNXK_VERSION="${MTPNXK_VERSION}"
     MTPNXK_GIT_HASH="${MTPNXK_GIT_HASH}"
     CYW43_HOST_NAME="mtpnxk"
@@ -106,6 +114,7 @@ target_link_libraries(mtpnxk PRIVATE
     pico_multicore
     pico_unique_id
     hardware_watchdog
+    hardware_vreg
     hardware_flash
     tinyusb_device
     tinyusb_host

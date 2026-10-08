@@ -7,6 +7,7 @@
 #include <stdio.h>
 
 #include "hardware/clocks.h"
+#include "hardware/vreg.h"
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
 #include "pico/multicore.h"
@@ -129,12 +130,20 @@ static void drain_nxk(void)
 int main(void)
 {
     // Pico-PIO-USB needs the system clock to be a multiple of 12 MHz.
-    bool clock_ok = set_sys_clock_khz(120000, true);
+    // MTPNXK_SYS_CLOCK_KHZ selects it; above 133 MHz the core needs more voltage.
+#ifndef MTPNXK_SYS_CLOCK_KHZ
+#define MTPNXK_SYS_CLOCK_KHZ 240000
+#endif
+#if MTPNXK_SYS_CLOCK_KHZ > 133000
+    vreg_set_voltage(VREG_VOLTAGE_1_15);
+    sleep_ms(2);
+#endif
+    bool clock_ok = set_sys_clock_khz(MTPNXK_SYS_CLOCK_KHZ, true);
     stdio_init_all();
     log_init();
     log_printf("mtpnxk %s (%s) starting, otactl slot build: %d", MTPNXK_VERSION, MTPNXK_GIT_HASH,
                (int)MTPNXK_OTACTL_SLOT);
-    log_printf("clocks: set_sys_clock 120 MHz %s, clk_sys=%lu Hz clk_peri=%lu Hz clk_usb=%lu Hz", clock_ok ? "ok" : "FAILED",
+    log_printf("clocks: set_sys_clock %d kHz %s, clk_sys=%lu Hz clk_peri=%lu Hz clk_usb=%lu Hz", (int)MTPNXK_SYS_CLOCK_KHZ, clock_ok ? "ok" : "FAILED",
                (unsigned long)clock_get_hz(clk_sys), (unsigned long)clock_get_hz(clk_peri),
                (unsigned long)clock_get_hz(clk_usb));
 
