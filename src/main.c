@@ -8,6 +8,7 @@
 
 #include "hardware/clocks.h"
 #include "hardware/watchdog.h"
+#include "pico/bootrom.h"
 #include "pico/multicore.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
@@ -64,9 +65,16 @@ static void console_handle(int c)
         sleep_ms(50);
         watchdog_reboot(0, 0, 0);
         break;
+    case 'b':
+        // Into the ROM bootloader, for hosts whose picotool cannot drive the
+        // reset interface with a custom product id.
+        log_printf("console: rebooting into BOOTSEL");
+        sleep_ms(50);
+        reset_usb_boot(0, 0);
+        break;
     case 'h':
     case '?':
-        log_printf("console: s=status c=config u=update(otactl) r=reboot");
+        log_printf("console: s=status c=config u=update(otactl) r=reboot b=bootsel");
         break;
     default:
         break;
