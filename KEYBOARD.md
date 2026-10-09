@@ -85,6 +85,15 @@ median / p95 / p99 / worst.
 - Qualification (section 8 limits) has not been measured. Tooling exists:
   `mtpnxk bench` plus the plugin's `bench` start option.
 
+### Follow-ups filed
+
+- [bdstark/GrandMA3MCP#12](https://github.com/bdstark/GrandMA3MCP/pull/12): hardkeys 0.5.0 (the vendored version) and the
+  **KB-09** write-up: bounded per-iteration cache of the shortcut rows (lifts the ~10 taps/s ceiling), same-target tie
+  resolution so `+ - . /` stop needing the raw-key workaround here, and operator-managed profile shortcuts for Load, Macro
+  and Thru (read-only report of free PC keys first; row writing only behind an opt-in and a live probe).
+- KB-08 (documentation and qualification) starts next and takes the remaining qualification items: lost-connection
+  cleanup timing on the console, a flood at the console, Windows with WinUSB, a second display, non-US layouts.
+
 ### Next steps
 
 1. On the onPC Mac: copy `tools/ma3/*.lua` and the XML into
