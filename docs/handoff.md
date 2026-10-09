@@ -105,6 +105,33 @@ own Lua plugin in onPC over a plain UDP socket**, both directions:
 
 The only MA3 configuration left is importing and starting the plugin.
 
+### Split with GrandMA3MCP (decided 2026-10-09)
+
+The hardkey layer is solved **once, in the MCP repo**, and consumed here:
+
+- **`hardkeys` Lua module in bdstark/GrandMA3MCP:** Quickey pool (reserve
+  and cache N Quickeys + N parked executor buttons at start, slot per held
+  key, press/release), `Keyboard()` wrappers, and the state readers the
+  feedback design needs (pending command-line keyword, programmer modes,
+  executor state). The bridge gains `hardkey` (press/release) and `type`
+  ops, which the MCP server wants anyway: holding Store or MA, hitting
+  Please, Clear, Oops or Esc as a user would, typing into pop-ups. The
+  MCP repo has the tests, CI and live verification against onPC 2.5.1,
+  so `Keyboard()` gets probed there. Note drafted in
+  `docs/mcp-hardkeys-note.md`; move it to that repo.
+- **Surface plugin stays separate, in this repo:** UDP bound to all
+  interfaces, JSON lines (key, wheel in; state out), real-time loop,
+  nothing else. It `require`s the same `hardkeys` module, copied into its
+  plugin package (MA3 loads components from the plugin's own XML). It
+  copies the bridge's yield-per-frame loop but never shares its
+  coroutine.
+- **Why not one plugin:** the bridge is loopback-only, unauthenticated
+  and can run arbitrary Lua, so it must not grow a LAN listener; a slow
+  bridge op (large dump, `Cmd` opening a dialog) would freeze the keypad
+  if they shared a coroutine; and the two iterate at different speeds.
+- **Cost:** two plugin starts after each show load. A single start macro
+  that calls both reduces it to one command.
+
 ### Transport
 
 The OSC menu has **one global Interface setting** (plus Preferred IP), so
@@ -132,13 +159,14 @@ bound to all interfaces receives from the LAN and from 127.0.0.1 alike.
 2. Run `python3 tools/osc_listen.py 8000` on bdsbrxi501, press Cue and turn
    an encoder. Expect `/key/Cue 1` then `/key/Cue 0`, and `/wheel/1 <float>`
    for Rotary1. Confirms the OSC path before the route change.
-3. On the onPC, in this order: `HelpLua` for the function list and key
-   code names; probe `Keyboard()` (`Lua "Keyboard(1,'char','5')"`, then a
-   hardkey press/release); prototype one Quickey press/release from Lua;
-   run `Plugin "SurfaceFeedback" "probe"` for the state getters (open
-   questions in `docs/ma3-feedback.md`). Then write the plugin: UDP
-   server after the MCP bridge's loop, JSON lines in (`key`, `wheel`),
-   state out, Quickey pool or `Keyboard()` for hardkeys.
+3. In the MCP repo (see `docs/mcp-hardkeys-note.md`): `HelpLua` for the
+   function list and key code names; probe `Keyboard()`; build the
+   `hardkeys` module with the Quickey pool and the state readers; expose
+   `hardkey` and `type` ops; live-test on onPC 2.5.1.
+3b. Here: the surface plugin, a UDP server after the bridge's loop, JSON
+   lines in (`key`, `wheel`) and state out, requiring `hardkeys`. Run
+   `Plugin "SurfaceFeedback" "probe"` for the remaining state getters
+   (open questions in `docs/ma3-feedback.md`).
 4. Firmware: replace the OSC publisher in `src/route.c`/`src/osc.c` with
    UDP/JSON to the plugin (keep OSC behind a config flag until the plugin
    is proven); add a UDP receive path, a state model, the NX-K LED map from
