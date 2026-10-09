@@ -284,7 +284,7 @@ fn main() -> Result<()> {
 fn print_summary(link: &link::Link) {
     let st = &link.stats;
     println!(
-        "link: paired={} hellos={} events={} acked={} refused={} retransmitted={} lost={} states={} link_downs={} rejected={} dropped_unpaired={}",
+        "link: paired={} hellos={} events={} acked={} refused={} retransmitted={} lost={} superseded={} states={} link_downs={} rejected={} dropped_unpaired={}",
         link.session().is_some(),
         st.hellos,
         st.events,
@@ -292,6 +292,7 @@ fn print_summary(link: &link::Link) {
         st.refused,
         st.retransmitted,
         st.lost,
+        st.superseded,
         st.states,
         st.link_downs,
         st.rejected,

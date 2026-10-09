@@ -85,6 +85,21 @@ median / p95 / p99 / worst.
 - Qualification (section 8 limits) has not been measured. Tooling exists:
   `mtpnxk bench` plus the plugin's `bench` start option.
 
+### Review of 2026-10-09 (four findings, all fixed)
+
+1. A retransmitted press could execute after its release: event ids now order the events of a key
+   (older than the newest processed → `superseded`, nothing dispatched), and the service stops
+   retransmitting a press once it sends the release.
+2. Unresolved releases were dropped across a restart: records are kept on stop, Cleanup and
+   `service()` errors, adopted before input is enabled at the next start (key reserved, new press
+   refused `conflict`), and released by the new `recover` command.
+3. The keypad fallback bypassed route safeguards: removed; `+ - . /` now resolve through hardkeys
+   0.5.0's `spec.prefer` with enablement, collision and route rechecks intact.
+4. A retransmitted refusal was acknowledged as success: the original acknowledgment is cached per
+   event id and replayed.
+
+Harness: 101 checks (was 87); service: 19 tests; `e2e.sh` passes.
+
 ### Follow-ups filed
 
 - [bdstark/GrandMA3MCP#12](https://github.com/bdstark/GrandMA3MCP/pull/12): hardkeys 0.5.0 (the vendored version) and the

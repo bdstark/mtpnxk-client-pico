@@ -12,7 +12,7 @@
 --   Plugin "mtpnxk_surface" "key=... input=fake"           lifecycle testing: events recorded, no key pressed
 --   Plugin "mtpnxk_surface" "key=... force"                start even though the MCP bridge has input enabled
 --   Plugin "mtpnxk_surface" "key=... bench"                report press-to-effect timing for NUM taps
---   Plugin "mtpnxk_surface" "stop" | "status"
+--   Plugin "mtpnxk_surface" "stop" | "status" | "recover"   (recover: re-attempt unresolved key releases)
 --
 -- Rules this plugin keeps (KEYBOARD.md KB-07, docs/surface-protocol.md):
 --   * every datagram is authenticated (SipHash-2-4 under the pairing key) before it is parsed; a sender
@@ -156,11 +156,11 @@ local NXK_KEYS = {
   -- Fade, Delay, Snap Shot and Back have no MA3 hardkey (onPC 2.5.1 enum, read live 2026-10-09);
   -- they are reported unsupported rather than mapped to something else.
 }
--- The default profile maps two shortcuts with equal modifier count to PLUS, MINUS, DOT and SLASH
--- (main row and keypad), which the resolver refuses as ambiguous. Both rows target the same MA key,
--- so the keypad row is pressed as a raw PC key when the logical route is ambiguous and that row is
--- one of the candidates. A raw hold has no route recheck (a remap during the hold is not noticed).
-local NXK_RAW_FALLBACK = { ["+"] = "kpAdd", ["-"] = "kpSubtract", ["."] = "kpDecimal", ["/"] = "kpDivide" }
+-- The default profile maps two shortcuts with equal modifier count to PLUS, MINUS, DOT and SLASH (main
+-- row and keypad). Both rows target the same MA key; the module resolves such a tie only when the consumer
+-- names the row (spec.prefer, hardkeys 0.5.0), and the chosen row keeps every safeguard: shortcut
+-- enablement, the collision check and the route rechecks before every release.
+local NXK_PREFER = { ["+"] = "kpAdd", ["-"] = "kpSubtract", ["."] = "kpDecimal", ["/"] = "kpDivide" }
 -- Keys the service may send that are not console keys (acknowledged unsupported, never an error).
 local NXK_LOCAL = { Bank = true, ["Swap Prog"] = true, Link = true, Rotary1 = true, Rotary2 = true, Rotary3 = true, Rotary4 = true }
 
@@ -192,7 +192,7 @@ local function parseArgument(argument)
   for tok in tostring(argument or ""):gmatch("%S+") do
     local l = tok:lower()
     local k, v = tok:match("^(%a+)=(.*)$")
-    if l == "stop" or l == "status" then opts.command = l
+    if l == "stop" or l == "status" or l == "recover" then opts.command = l
     elseif l == "force" then opts.force = true
     elseif l == "bench" then opts.bench = true
     elseif k then
@@ -277,26 +277,12 @@ end
 local function describeKeys(logReasons)
   local inst = hk()
   local ok, unsupported, reasons = {}, {}, {}
-  state.rawKeys = {}
   for name, logical in pairs(NXK_KEYS) do
     local supported, reason = false, "hardkeys module not loaded"
     if inst then
-      local okC, r = pcall(inst.describeKey, inst, logical)
+      local okC, r = pcall(inst.describeKey, inst, logical, { prefer = NXK_PREFER[name] })
       if okC and type(r) == "table" and r.supported then supported = true else reason = tostring(okC and (r and r.reason) or r) end
-      local raw = NXK_RAW_FALLBACK[name]
-      if not supported and raw and okC and type(r) == "table" and type(r.candidates) == "table" then
-        for _, c in ipairs(r.candidates) do
-          if c == raw then
-            local codes = nil
-            pcall(function() codes = Enums and Enums.KeyboardCodes end)
-            if codes == nil or codes[raw] ~= nil then
-              supported, reason = true, nil
-              state.rawKeys[name] = raw
-              if logReasons then log("key %s: logical %s is ambiguous (%s); pressing the keypad row %s as a raw PC key", name, logical, table.concat(r.candidates, ", "), raw) end
-            end
-          end
-        end
-      end
+      if supported and logReasons and r.prefer then log("key %s: %s resolved through the preferred row %s (%s)", name, logical, r.prefer, tostring(r.shortcut)) end
     end
     if supported then ok[#ok + 1] = name else unsupported[#unsupported + 1] = name; reasons[name] = reason end
   end
@@ -334,7 +320,7 @@ local function openSession(obj, ip, port, now)
   local sid = randomHex(8)
   while state.sessions[sid] do sid = randomHex(8) end
   local s = { sid = sid, id = obj.id, gen = obj.gen, ip = ip, port = port, openedAt = now, lastSeen = now, lastSeq = 0, outSeq = 0,
-              holds = {}, evSeen = {}, evOrder = {}, rate = { since = now, count = 0 }, state = "active",
+              holds = {}, evSeen = {}, evOrder = {}, evAck = {}, lastEvByKey = {}, rate = { since = now, count = 0 }, state = "active",
               unsyncedHeld = held, lastFullAt = nil, lastState = nil, sessionOpen = false, surface = obj.surface, fw = obj.fw }
   local inst = hk()
   if inst and state.inputEnabled then
@@ -378,7 +364,8 @@ local function admitPacket(s, obj, now)
   return true, revived
 end
 
--- Event-id deduplication: a window of the last evWindow ids per session.
+-- Event-id deduplication: a window of the last evWindow ids per session. A seen event is answered with
+-- its ORIGINAL acknowledgment (a refusal stays a refusal) and is never dispatched again.
 local function seenEvent(s, ev)
   if s.evSeen[ev] then return true end
   s.evSeen[ev] = true
@@ -386,7 +373,32 @@ local function seenEvent(s, ev)
   if #s.evOrder > DEFAULTS.evWindow then
     local old = table.remove(s.evOrder, 1)
     s.evSeen[old] = nil
+    s.evAck[old] = nil
   end
+  return false
+end
+
+local function replayAck(s, ev)
+  state.counters.dupEvents = state.counters.dupEvents + 1
+  local a = s.evAck[ev]
+  if a then
+    local copy = {}
+    for k, v in pairs(a) do copy[k] = v end
+    copy.dup = 1
+    sendToSession(s, copy)
+  else
+    -- Seen but its outcome already left the window: say so rather than invent a success.
+    sendToSession(s, { t = "ack", ev = ev, ok = 0, dup = 1, code = "outcome-expired", why = "event already processed; its outcome is no longer remembered" })
+  end
+end
+
+-- Event ids are monotonic per service start. A key event older than the newest one already processed
+-- for the same surface key is superseded: a retransmitted press arriving after its release, or a stale
+-- release arriving after a newer press, must not act. Nothing is dispatched for it.
+local function superseded(s, name, ev)
+  local last = s.lastEvByKey[name]
+  if last and ev < last then return true end
+  s.lastEvByKey[name] = ev
   return false
 end
 
@@ -400,6 +412,9 @@ end
 local function ackEvent(s, ev, ok, extra)
   local a = { t = "ack", ev = ev, ok = ok and 1 or 0 }
   if extra then for k, v in pairs(extra) do a[k] = v end end
+  local keep = {}
+  for k, v in pairs(a) do keep[k] = v end
+  s.evAck[ev] = keep
   sendToSession(s, a)
 end
 
@@ -411,14 +426,18 @@ local function handleKey(s, obj, now)
   if type(ev) ~= "number" or ev ~= math.floor(ev) or ev < 0 then return "bad-ev" end
   if type(name) ~= "string" or (NXK_KEYS[name] == nil and not NXK_LOCAL[name]) then return "bad-key" end
   if down ~= 0 and down ~= 1 then return "bad-d" end
-  if seenEvent(s, ev) then state.counters.dupEvents = state.counters.dupEvents + 1; ackEvent(s, ev, true, { dup = 1 }); return nil end
+  if seenEvent(s, ev) then replayAck(s, ev); return nil end
+  if superseded(s, name, ev) then
+    state.counters.superseded = state.counters.superseded + 1
+    ackEvent(s, ev, false, { code = "superseded", why = "a newer event for this key was already processed; nothing dispatched" })
+    return nil
+  end
   local logical = NXK_KEYS[name]
   if not logical then ackEvent(s, ev, false, { code = "unsupported", why = "not a console key" }); return nil end
   local inst = hk()
   if not inst or not state.inputEnabled then ackEvent(s, ev, false, { code = "input-disabled", why = "input is " .. tostring(state.inputMode) }); return nil end
   if down == 1 then
-    local spec = state.rawKeys[name] and { pcKey = state.rawKeys[name], display = state.display } or { key = logical, display = state.display }
-    local r, err = inst:press(s.sid, now, spec)
+    local r, err = inst:press(s.sid, now, { key = logical, display = state.display, prefer = NXK_PREFER[name] })
     if not r then
       state.counters.refused = state.counters.refused + 1
       ackEvent(s, ev, false, { code = tostring(err and err.code or "error"), why = tostring(err and err.message or err) })
@@ -459,7 +478,7 @@ local function handleWheel(s, obj, now)
   if type(ev) ~= "number" or ev ~= math.floor(ev) or ev < 0 then return "bad-ev" end
   if type(obj.w) ~= "number" or obj.w < 1 or obj.w > 4 or obj.w ~= math.floor(obj.w) then return "bad-wheel" end
   if type(obj.dx) ~= "number" or obj.dx < -127 or obj.dx > 127 then return "bad-dx" end
-  if seenEvent(s, ev) then ackEvent(s, ev, true, { dup = 1 }); return nil end
+  if seenEvent(s, ev) then replayAck(s, ev); return nil end
   state.counters.wheels = state.counters.wheels + 1
   -- No verified Lua route for encoder input exists yet (docs/surface-protocol.md section 7).
   ackEvent(s, ev, false, { code = "unsupported", why = "wheel input has no verified console route yet" })
@@ -673,16 +692,43 @@ end
 -------------------------------------------------------------------------------
 -- One loop iteration (section 4 of the protocol doc). Exposed for the harness.
 -------------------------------------------------------------------------------
+-- Takes the hardkeys instance out of service without losing what it owns: input off, a release attempt
+-- for every held key, and every record that stays unresolved kept in state.unresolved for adoption by
+-- the next start and for the "recover" command. Used on a service() error, at stop and in Cleanup.
+local function detachHardkeys(reason, now)
+  local rec = state.modules.hardkeys
+  local inst = rec and rec.instance
+  if not inst then return end
+  local okS, st = pcall(inst.status, inst)
+  if okS and type(st) == "table" and st.state == "ready" then
+    state.inputEnabled = false
+    local okD, dis = pcall(inst.disableInput, inst, now, reason)
+    if okD and type(dis) == "table" then
+      for _, a in ipairs(dis.unresolved or {}) do logerr("%s: release of %s UNRESOLVED: %s", reason, tostring(a.logical or a.tupleKey), tostring(a.error)) end
+    end
+  end
+  local ok, r = pcall(inst.dispose, inst, now)
+  if ok and type(r) == "table" then
+    state.unresolved = state.unresolved or {}
+    for _, record in ipairs(r.records or {}) do
+      record.keptAt, record.keptReason = now, reason
+      state.unresolved[#state.unresolved + 1] = record
+      logerr("keeping unresolved record %s(%s) of session %s: %s", tostring(record.logical or "raw"), tostring(record.tupleKey), tostring(record.session), tostring(record.unresolved and record.unresolved.reason))
+    end
+    if #(r.records or {}) > 0 then logerr("%d unresolved release record(s) kept; they are adopted at the next start and released by  Plugin \"mtpnxk_surface\" \"recover\"", #r.records) end
+  elseif not ok then logerr("dispose failed on %s: %s", reason, tostring(r)) end
+  rec.instance = nil
+  state.inputEnabled = false
+end
+
 local function serviceModules(now)
   local released = {}
   local inst = hk()
   if inst then
     local ok, res = pcall(inst.service, inst, now)
     if not ok then
-      logerr("hardkeys service() raised: %s; input disabled, module detached", tostring(res))
-      state.inputEnabled = false
-      pcall(inst.disableInput, inst, now, "service-error")
-      state.modules.hardkeys.instance = nil
+      logerr("hardkeys service() raised: %s; input disabled, module detached (its records are kept)", tostring(res))
+      detachHardkeys("service-error", now)
     elseif type(res) == "table" then
       for _, a in ipairs(res.released or {}) do released[a.hold] = true end
       for _, a in ipairs(res.unresolved or {}) do released[a.hold] = true; logerr("deadline release of %s UNRESOLVED: %s", tostring(a.logical or a.tupleKey), tostring(a.error)) end
@@ -744,7 +790,7 @@ end
 
 local function resetCounters()
   state.counters = { received = 0, sent = 0, sendErrors = 0, rejected = 0, oversized = 0, notAllowed = 0, ignored = 0, noSession = 0,
-                     oldSeq = 0, rateDropped = 0, dupEvents = 0, refused = 0, presses = 0, releases = 0, wheels = 0, lostReleases = 0,
+                     oldSeq = 0, rateDropped = 0, dupEvents = 0, superseded = 0, refused = 0, presses = 0, releases = 0, wheels = 0, lostReleases = 0,
                      replayedHello = 0, addressChanged = 0, fullStates = 0, deltaStates = 0, ticks = 0 }
 end
 
@@ -773,6 +819,43 @@ local function loadModules()
   log("modules: %s", table.concat(summary, ", "))
 end
 state._loadModules = loadModules
+
+-- Records a previous run could not release are adopted before any input is admitted: their tuples stay
+-- reserved (a new press of the same key is refused with "conflict") until "recover" releases them.
+-- Records the module rejects (capacity, a tuple already owned) stay in state.unresolved for a later try.
+local function adoptKept(t)
+  local inst = hk()
+  local kept = state.unresolved or {}
+  if not inst or #kept == 0 then return end
+  local ok, r = pcall(inst.adopt, inst, kept, t)
+  if not ok then logerr("adopting %d kept record(s) failed: %s; they are kept", #kept, tostring(r)); return end
+  local remaining = {}
+  for _, rej in ipairs(r.rejected or {}) do remaining[#remaining + 1] = rej.record; logerr("kept record not adopted (%s); kept for a later start", tostring(rej.reason)) end
+  state.unresolved = remaining
+  for _, a in ipairs(r.adopted or {}) do log("adopted unresolved record %s(%s): its key stays reserved until \"recover\" releases it", tostring(a.logical or "raw"), tostring(a.tupleKey)) end
+end
+
+-- Operator recovery: re-attempt every unresolved release (adopted or current). Without input enabled
+-- the keyboard backend is attached for cleanup only; input stays as configured.
+local function recoverUnresolved()
+  local rec = state.modules.hardkeys
+  local inst = rec and rec.instance
+  if not inst then logerr("recover: the plugin is not running (start it first; kept records are adopted at start)"); return end
+  local t = now()
+  adoptKept(t)
+  local st = inst:status(t)
+  if not st.backend.attached then
+    local HK = rec.module
+    local a, err = inst:attachBackend(HK.keyboardBackend(HK.consoleDeps(_G), { defaultDisplay = state.display }))
+    if not a then logerr("recover: could not attach the keyboard backend for cleanup: %s", tostring(err and err.message)); return end
+    log("recover: keyboard backend attached for cleanup only (input stays %s)", tostring(state.inputMode))
+  end
+  local r = inst:recover(nil, t)
+  for _, a in ipairs(r.released or {}) do log("recover: released %s(%s) of session %s", tostring(a.logical or "raw"), tostring(a.tupleKey), tostring(a.session)) end
+  for _, a in ipairs(r.unresolved or {}) do logerr("recover: %s(%s) still UNRESOLVED: %s", tostring(a.logical or "raw"), tostring(a.tupleKey), tostring(a.error)) end
+  log("recover: %d released, %d still unresolved, %d record(s) not adopted", #(r.released or {}), #(r.unresolved or {}), #(state.unresolved or {}))
+end
+state._recover = recoverUnresolved
 
 local function bridgeInputEnabled()
   local b = rawget(_G, "__gma3_mcp_bridge")
@@ -805,14 +888,7 @@ end
 local function disposeAll(reason)
   local t = now()
   for _, s in pairs(state.sessions or {}) do closeSession(s, t, reason) end
-  local inst = hk()
-  if inst then
-    local ok, r = pcall(inst.dispose, inst, t)
-    if ok and type(r) == "table" and #(r.records or {}) > 0 then
-      for _, rec in ipairs(r.records) do logerr("unresolved record kept: %s(%s) session %s: %s", tostring(rec.logical or "raw"), tostring(rec.tupleKey), tostring(rec.session), tostring(rec.unresolved and rec.unresolved.reason)) end
-      state.unresolved = r.records
-    end
-  end
+  detachHardkeys(reason, t)
   local f = fb()
   if f then pcall(f.dispose, f) end
   state.modules = {}
@@ -874,6 +950,7 @@ local function start(opts)
     log("feedback: watching %d item(s)", w.watched)
   end
   state.commandText = function() return CmdObj().cmdtext end
+  adoptKept(now())
   enableInput(opts.input, opts.force)
   describeKeys(true)
   return true
@@ -887,8 +964,12 @@ local function MainImpl(display_handle, argument)
     if state.running then state.stopRequested = true; log("stop requested") else log("not running") end
     return
   end
+  if opts.command == "recover" then recoverUnresolved(); return end
   if opts.command == "status" then
     log("%s", describe())
+    if state.unresolved and #state.unresolved > 0 then log("%d unresolved record(s) kept from a previous run (not adopted yet)", #state.unresolved) end
+    local inst = hk()
+    if inst then local st = inst:status(now()); if st.unresolved > 0 then log("%d unresolved hold(s) on the instance; run  Plugin \"mtpnxk_surface\" \"recover\"", st.unresolved) end end
     for sid, s in pairs(state.sessions or {}) do
       local held = {}
       for name in pairs(s.holds) do held[#held + 1] = name end

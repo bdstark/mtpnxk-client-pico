@@ -56,6 +56,8 @@ pub struct Stats {
     pub retransmitted: u64,
     pub lost: u64,
     pub dropped_unpaired: u64,
+    /// Presses still awaiting an ack when their release went out: no longer retransmitted.
+    pub superseded: u64,
     pub states: u64,
     pub deltas_ignored: u64,
     pub link_downs: u64,
@@ -264,6 +266,17 @@ impl Link {
         if self.session().is_none() {
             self.stats.dropped_unpaired += 1;
             return;
+        }
+        if !down {
+            // A press of this key that was never acknowledged must not be delivered after its release:
+            // stop retransmitting it (the plugin rejects it as superseded anyway; the tap is lost).
+            let before = self.pending.len();
+            self.pending.retain(|p| !matches!(p.kind, PendingKind::Key { k, d: 1 } if k == name));
+            let n = (before - self.pending.len()) as u64;
+            if n > 0 {
+                self.stats.superseded += n;
+                self.note(format!("press of {name} never acknowledged before its release: no longer retransmitted"));
+            }
         }
         let ev = self.ev_next;
         self.ev_next += 1;
@@ -610,6 +623,23 @@ mod tests {
         let late = plugin.ack(2, true);
         link.receive(&late, 11.5);
         assert_eq!(link.stats.acked, 2);
+    }
+
+    #[test]
+    fn a_release_stops_retransmitting_its_unacknowledged_press() {
+        let (mut link, mut plugin) = pair(0.0);
+        link.key_event("Record", true, 0.1);
+        plugin.decode(link.take_outgoing()); // press lost on the way (never acked)
+        link.key_event("Record", false, 0.12);
+        let out = plugin.decode(link.take_outgoing());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0]["d"], 0);
+        for i in 1..=5 {
+            link.tick(0.12 + 0.07 * i as f64);
+        }
+        let later = plugin.decode(link.take_outgoing());
+        assert!(later.iter().all(|p| p["t"] != "key" || p["d"] == 0), "only the release is retransmitted: {later:?}");
+        assert_eq!(link.stats.superseded, 1);
     }
 
     #[test]

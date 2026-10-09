@@ -131,8 +131,17 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
 - Events (`key`, `wheel`) carry an event id `ev`, monotonic per service start,
   independent of `seq`. A retransmission of an event is a new packet (new
   `seq`) carrying the same `ev`. The plugin deduplicates on `ev` with a window
-  of the last 64 ids per session; a duplicate is acknowledged again and not
-  dispatched.
+  of the last 64 ids per session; a duplicate is answered with the **original**
+  acknowledgment (a refusal stays a refusal, `dup:1` added) and is never
+  dispatched again. An id whose outcome left the window is answered
+  `ok:0, code:"outcome-expired"`.
+- Event ids order the events of one key: a key event with an `ev` lower than
+  the newest one already processed for that key is **superseded** and
+  acknowledged `ok:0, code:"superseded"` without dispatch. So a press whose
+  first copy was lost cannot execute after its release was processed, and a
+  stale release cannot end a newer press. The service also stops
+  retransmitting a press once it sends that key's release (counted
+  `superseded`); the tap is lost, never late.
 - The plugin answers every `key` and `wheel` with
   `ack { t:"ack", sid, seq, ev, ok:0|1, code?, why?, hold? }`. `ok:1` means the
   event was dispatched to the module (for a press: the hold exists and the
@@ -194,6 +203,16 @@ every check reaches `hardkeys`/`feedback`.
   A hold whose physical release the service observed is therefore never
   re-pressed from a heartbeat, and a tap is never replayed: taps are two
   events with their own ids, and ids are never regenerated.
+- **Unresolved releases survive a restart.** A release the module could not
+  confirm (refused, raised, or the route changed during the hold) is kept as
+  a record when the plugin stops, is detached after a `service()` error, or
+  is cleaned up by the console. The next start **adopts** those records
+  before enabling input: their key stays reserved (a new press of it is
+  refused with `conflict`) until the operator runs
+  `Plugin "mtpnxk_surface" "recover"`, which re-attempts the releases through
+  the current backend (attached for cleanup only when input is off) and
+  reports what is still unresolved. Records the module rejects at adoption are
+  kept for the next start; `status` lists both.
 - **Restart.** After a plugin restart every session is gone (new `sid`, new
   plugin generation). After a service restart the hello carries a new
   surface `gen` and the keys physically down in `held`; the plugin opens a
@@ -288,8 +307,15 @@ user profile's shortcut table; unresolved keys are reported in
 | `Bank`, `Rotary1`–`Rotary4` (turn and press), `Swap Prog`, `Link` | none | wheels are carried as `wheel` events and acknowledged `unsupported` until a verified Lua route for encoder input exists; Bank is the service's wheel modifier; Link is the link LED |
 
 Hardkeys 0.5.0 resolves any `Enums.VirtualKeyCode` name through the shortcut
-table (the fixed `MA` and native `PLEASE` routes stay special); that
-extension was made in the MCP repository and re-vendored, not forked here.
+table (the fixed `MA` and native `PLEASE` routes stay special), and lets the
+consumer name the row of a same-target tie (`spec.prefer`): the default
+profile maps `+ - . /` on the main row and the keypad, and the plugin prefers
+the keypad row (`kpAdd`, `kpSubtract`, `kpDecimal`, `kpDivide`) through the
+normal route, so shortcut enablement, the collision check and the rechecks
+before every release all apply. Both extensions were made in the MCP
+repository (PR #12) and re-vendored, not forked here. Fade, Delay, Snap Shot
+and Back are not MA3 hardkeys and stay unsupported; Load, Macro and Thru need
+a shortcut in the user profile.
 
 ## 8. Measurable limits (chosen before qualification)
 

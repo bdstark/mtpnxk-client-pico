@@ -128,7 +128,7 @@ check("hello answered with a welcome", welcome and welcome.nonce == hello.nonce 
 local function has(list, v) for _, x in ipairs(list or {}) do if x == v then return true end end return false end
 check("welcome reports key resolution as sorted lists", welcome and has(welcome.keys.ok, "Record") and has(welcome.keys.ok, "Enter") and has(welcome.keys.ok, "5") and has(welcome.keys.ok, "Edit") and has(welcome.keys.unsupported, "Copy") and has(welcome.keys.unsupported, "Bank") and has(welcome.keys.unsupported, "Thru") and has(welcome.keys.ok, "+") and has(welcome.keys.ok, "-") and #welcome.keys.ok == 17, J(welcome and welcome.keys))
 check("unsupported reasons are logged at start, never guessed", state.keyReasons.Copy:find("no keyboard shortcut maps to COPY") and state.keyReasons.Update:find("not an Enums.VirtualKeyCode") and state.keyReasons.Bank == "not a console key" and findLog("key Copy unsupported"), J(state.keyReasons))
-check("an ambiguous keypad key falls back to the keypad row as a raw PC key", state.rawKeys["+"] == "kpAdd" and state.rawKeys["-"] == "kpSubtract" and state.rawKeys["."] == nil and findLog("pressing the keypad row kpAdd"), J(state.rawKeys))
+check("an ambiguous keypad key resolves through the preferred keypad row of the shortcut table", findLog("key %+: PLUS resolved through the preferred row kpAdd") and findLog("key %-: MINUS resolved through the preferred row kpSubtract"), lastLog())
 check("welcome fits the service's datagram limit", #outbox == 0 or true)
 check("welcome carries module versions, input mode, protocol", welcome and welcome.modules.gma3_mcp_hardkeys == "0.5.0" and welcome.input == "fake" and welcome.v == 1 and welcome.epoch == 1, J(welcome))
 check("keys physically down in the hello are not pressed", eventCount("press") == 0 and findLog("1 key%(s%) physically down, not pressed"))
@@ -208,8 +208,36 @@ check("a generic VirtualKeyCode key (Edit via E) is pressed", ack and ack.ok == 
 send({ t = "key", ev = 15, k = "Edit", d = 0 }); tick(); drain()
 send({ t = "key", ev = 16, k = "+", d = 1 }); tick()
 ack = ofType(drain(), "ack")[1]
-check("'+' is pressed as the raw keypad key", ack and ack.ok == 1 and events()[#events()].pcKey == "kpAdd", J(ack))
+check("'+' is pressed on the preferred keypad row through the shortcut-table route", ack and ack.ok == 1 and events()[#events()].pcKey == "kpAdd" and state.modules.hardkeys.instance:status().holds[#state.modules.hardkeys.instance:status().holds].route.source == "shortcut-table", J(ack))
 send({ t = "key", ev = 17, k = "+", d = 0 }); tick(); drain()
+console.shortcuts = "false"
+send({ t = "key", ev = 18, k = "+", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("'+' is refused while shortcuts are inactive (no raw bypass)", ack and ack.ok == 0 and ack.code == "unsupported" and ack.why:find("inactive"), J(ack))
+console.shortcuts = "true"
+-------------------------------------------------------------------------------
+-- Review findings: superseded events, outcome replay
+-------------------------------------------------------------------------------
+-- A press lost on the way, its release delivered, then the press retransmitted (new seq, old ev).
+-- (Event ids only need to be ordered per key; Record's ids here stay below the later sections' 20+.)
+local p0 = eventCount("press")
+send({ t = "key", ev = 10, k = "Record", d = 0 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("release without a press is a no-op", ack and ack.noop == 1)
+send({ t = "key", ev = 5, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a retransmitted press older than its processed release is superseded, not pressed", ack and ack.ok == 0 and ack.code == "superseded" and eventCount("press") == p0 and state.sessions[sid].holds.Record == nil and state.counters.superseded == 1, J(ack))
+send({ t = "key", ev = 13, k = "Record", d = 1 }); tick(); drain()
+send({ t = "key", ev = 11, k = "Record", d = 0 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a stale release older than the newest press does not release it", ack and ack.code == "superseded" and state.sessions[sid].holds.Record ~= nil, J(ack))
+send({ t = "key", ev = 19, k = "Record", d = 0 }); tick(); drain()
+check("the matching release does", state.sessions[sid].holds.Record == nil)
+send({ t = "key", ev = 50, k = "Copy", d = 1 }); tick()
+local first50 = ofType(drain(), "ack")[1]
+send({ t = "key", ev = 50, k = "Copy", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a retransmitted refused event is answered with the original refusal", first50.ok == 0 and ack and ack.ok == 0 and ack.dup == 1 and ack.code == first50.code and ack.why == first50.why, J({ first50, ack }))
 
 -------------------------------------------------------------------------------
 -- Heartbeat reconciliation: lost release, lost press
@@ -381,6 +409,41 @@ send({ t = "key", ev = 1, k = "Record", d = 1 }); tick()
 ack = ofType(drain(), "ack")[1]
 check("independent instances do not arbitrate: both hold the same tuple (documented, not a lock)", ack and ack.ok == 1 and other:status().holdCount == 1 and state.modules.hardkeys.instance:status().holdCount == 1)
 _G.__gma3_mcp_bridge = nil
+
+-------------------------------------------------------------------------------
+-- Review finding: unresolved releases survive a restart and block the key until recovered
+-------------------------------------------------------------------------------
+reset()
+push({ t = "hello", v = 1, id = "nxk-r", gen = 1, nonce = "3333333333333333" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick(); drain()
+state.adapter:failNext("release", { pcKey = "S", shift = false, ctrl = false, alt = false, numlock = false }, "stuck", true)
+send({ t = "key", ev = 2, k = "Record", d = 0 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a failed release is acknowledged unresolved", ack and ack.ok == 0 and ack.code == "unresolved", J(ack))
+state.running = true
+Cleanup()
+check("cleanup keeps the unresolved record", state.running == false and #state.unresolved == 1 and state.unresolved[1].pcKey == "S" and findLog("unresolved release record%(s%) kept"), J(state.unresolved))
+reset()
+check("the next start adopts the record before input is enabled", #state.unresolved == 0 and state.modules.hardkeys.instance:status().unresolved == 1 and findLog("adopted unresolved record STORE"), J(state.modules.hardkeys.instance:status().holds))
+push({ t = "hello", v = 1, id = "nxk-r", gen = 2, nonce = "4444444444444444" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("the adopted key is reserved: a new press is refused with conflict, nothing pressed", ack and ack.ok == 0 and ack.code == "conflict" and eventCount("press") == 0, J(ack))
+state.running = true
+Main(nil, "recover")
+check("recover releases the adopted record through the current backend", eventCount("release") == 1 and state.modules.hardkeys.instance:status().unresolved == 0 and findLog("recover: released STORE"), lastLog())
+send({ t = "key", ev = 2, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("after recovery the key works again", ack and ack.ok == 1 and eventCount("press") == 1, J(ack))
+state.adapter:failNext("release", { pcKey = "S", shift = false, ctrl = false, alt = false, numlock = false }, "stuck", true)
+state.modules.hardkeys.instance.service = function() error("boom") end
+tick()
+check("a service() error detaches the module but keeps its records", state.modules.hardkeys.instance == nil and #state.unresolved == 1 and state.inputEnabled == false and findLog("records are kept"), J(state.unresolved))
+reset()
+check("those records are adopted at the next start too", state.modules.hardkeys.instance:status().unresolved == 1)
+state.running = true; Cleanup()
 
 -------------------------------------------------------------------------------
 -- Allow list, stop and Cleanup
