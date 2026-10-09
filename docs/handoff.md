@@ -1,3 +1,7 @@
+> **Superseded 2026-10-09.** This note describes the Pico W direction, now archived
+> under `legacy/pico`. The current design is `docs/surface-protocol.md` and the
+> status is in `KEYBOARD.md`; the surface consumer is the Rust service in `service/`.
+
 # State of play, 2026-10-08 (updated after the LED session and the Lua decision)
 
 Written at the end of the first bring-up session so the next one can start at

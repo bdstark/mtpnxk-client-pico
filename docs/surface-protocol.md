@@ -59,7 +59,8 @@ the NX-K).
 
 ### Transport
 
-UDP, one JSON object per datagram, at most 512 bytes. Datagram layout:
+UDP, one JSON object per datagram: at most 512 bytes towards the plugin, at most
+1024 bytes from it (the welcome carries key lists). Datagram layout:
 
 ```
 MTX1 <mac> <json>
@@ -101,7 +102,10 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
   for the nonce of its latest hello. A hello whose `nonce` the plugin has seen
   in the last 60 s is dropped (replayed hello cannot restart a session).
 - `welcome.gen` is the **plugin generation** (section 5), `lease` the session
-  lease in ms (2000), `hb` the heartbeat interval in ms (250).
+  lease in ms (2000), `hb` the heartbeat interval in ms (250). `welcome.keys`
+  is `{ ok: [...], unsupported: [...] }`, sorted surface key names; the reason
+  for each unsupported key is in the plugin's log (`key X unsupported: …`).
+  `welcome.input` is the plugin's input mode (`keyboard`, `fake` or `off`).
 - A hello for an `id` with an open session closes that session first (its
   holds are released) and opens a new one: a restarted service never inherits
   holds. The `held` list in the hello is **informational**: those keys are
@@ -144,8 +148,9 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
 - Between 2 s and 10 s a packet revives the session (`hb` reply carries
   `resynced:1`); nothing is re-pressed.
 - Service watchdog: no plugin packet (hb reply, ack or state) for 1500 ms →
-  link down: Link LED blinks, every state item becomes unknown, hello every
-  2 s until a welcome arrives.
+  link down: Link LED blinks, every state item becomes unknown. After 4 s of
+  silence, or on `err no-session` for its session, the service pairs again
+  (hello every 2 s until a welcome arrives).
 
 ### Validation before any module call
 
