@@ -66,10 +66,18 @@ UDP, one JSON object per datagram: at most 512 bytes towards the plugin, at most
 MTX1 <mac> <json>
 ```
 
-`MTX1` is the magic and version, `<mac>` is the first 16 bytes of
-HMAC-SHA256(key, `<json>` bytes) as 32 lower-case hex characters, `<json>` is
-the exact byte string that was authenticated. No canonicalisation is needed:
-the MAC covers the bytes as sent.
+`MTX1` is the magic and version, `<mac>` is SipHash-2-4 of the `<json>`
+bytes under the first 16 bytes of the pairing key, as 16 lower-case hex
+characters, and `<json>` is the exact byte string that was authenticated. No
+canonicalisation is needed: the MAC covers the bytes as sent.
+
+Why SipHash and not HMAC-SHA256: the plugin computes the MAC in pure Lua
+inside onPC, where HMAC-SHA256 was measured at 20 ms per packet (2026-10-09,
+onPC 2.5.1 on macOS), enough to collapse the console frame rate at a few
+dozen packets per second. SipHash-2-4 is a keyed PRF with a 128-bit key and
+a 64-bit tag; forging a tag online is bounded by the per-address throttle
+below, and the key never leaves the two configured endpoints. Both
+implementations are checked against the SipHash paper's reference vector.
 
 The plugin binds `127.0.0.1:9810` by default (the service on the same PC).
 `bind=0.0.0.0` (or an interface address) and an optional `allow=<ip>[,<ip>]`
@@ -79,7 +87,8 @@ accepted.
 ### Authorization
 
 The pairing key is a 32-byte secret configured on both sides (`key=<64 hex>`
-at plugin start, `--key` / config file / `MTPNXK_KEY` for the service). A
+at plugin start, `--key` / `--key-file` / `MTPNXK_KEY` for the service); the
+MAC uses its first 16 bytes, the rest is reserved. A
 packet whose MAC does not verify is dropped before it is parsed; nothing it
 contains is trusted, including its sender or session id. **Possession of the
 key is the authorization; a sender id is a label.** Per source address, after

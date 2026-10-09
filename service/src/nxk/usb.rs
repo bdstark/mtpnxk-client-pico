@@ -58,7 +58,17 @@ impl UsbKeypad {
             .ok_or_else(|| anyhow!("no NX-K ({VID:04x}:{PID:04x}) found; on Windows bind WinUSB to it with Zadig"))?;
         let name = format!("NX-K {}", info.serial_number().unwrap_or("(no serial)"));
         let device = info.open().wait().context("opening the NX-K")?;
-        let interface = device.claim_interface(INTERFACE).wait().context("claiming interface 0 (is another program using the keypad?)")?;
+        // The keypad may sit unconfigured (no SET_CONFIGURATION yet, as on a fresh macOS attach);
+        // claiming an interface then fails with "interface not found".
+        let configured = device.active_configuration().map(|c| c.configuration_value()).unwrap_or(0);
+        if configured == 0 {
+            let first = device.configurations().next().map(|c| c.configuration_value()).unwrap_or(1);
+            device.set_configuration(first).wait().with_context(|| format!("selecting configuration {first}"))?;
+        }
+        let interface = device.claim_interface(INTERFACE).wait().with_context(|| {
+            let ifaces: Vec<String> = info.interfaces().map(|i| format!("{} ({:02x}/{:02x}/{:02x})", i.interface_number(), i.class(), i.subclass(), i.protocol())).collect();
+            format!("claiming interface 0 (is another program using the keypad?); interfaces reported: {ifaces:?}")
+        })?;
         interface.set_alt_setting(ALT_SETTING).wait().context("selecting alternate setting 1")?;
         let mut ep = interface.endpoint::<Interrupt, In>(ENDPOINT_IN).context("opening interrupt IN 0x82")?;
 

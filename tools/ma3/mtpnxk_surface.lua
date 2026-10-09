@@ -15,7 +15,7 @@
 --   Plugin "mtpnxk_surface" "stop" | "status"
 --
 -- Rules this plugin keeps (KEYBOARD.md KB-07, docs/surface-protocol.md):
---   * every datagram is authenticated (HMAC-SHA256 with the pairing key) before it is parsed; a sender
+--   * every datagram is authenticated (SipHash-2-4 under the pairing key) before it is parsed; a sender
 --     id is a label, the key is the authorization;
 --   * sessions have fresh random ids, strictly increasing sequence numbers, event-id deduplication,
 --     a 2 s lease renewed by any valid packet and a 10 s forget time;
@@ -79,54 +79,36 @@ local function logerr(f, ...)
 end
 
 -------------------------------------------------------------------------------
--- SHA-256 and HMAC (pure Lua 5.3+, integer ops). Verified against FIPS/RFC 4231 vectors in the harness.
+-- SipHash-2-4 (pure Lua 5.3+, 64-bit integer arithmetic wraps as the algorithm needs). The MAC of a
+-- datagram is SipHash-2-4 of the JSON bytes under the first 16 bytes of the pairing key, as 16 hex
+-- characters. HMAC-SHA256 was measured at 20 ms per call in onPC's Lua (2026-10-09); SipHash costs
+-- about 1 ms there. Checked against the SipHash paper's reference vectors in the harness.
 -------------------------------------------------------------------------------
-local K256 = {
-  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-}
-local function rrot(x, n) return ((x >> n) | (x << (32 - n))) & 0xffffffff end
+local function rotl(x, b) return (x << b) | (x >> (64 - b)) end
 
-local function sha256(msg)
-  local len = #msg
-  msg = msg .. "\128" .. string.rep("\0", (55 - len) % 64) .. string.pack(">I8", len * 8)
-  local h0, h1, h2, h3, h4, h5, h6, h7 = 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
-  local w = {}
-  for chunk = 1, #msg, 64 do
-    for i = 1, 16 do w[i] = string.unpack(">I4", msg, chunk + (i - 1) * 4) end
-    for i = 17, 64 do
-      local s0 = rrot(w[i - 15], 7) ~ rrot(w[i - 15], 18) ~ (w[i - 15] >> 3)
-      local s1 = rrot(w[i - 2], 17) ~ rrot(w[i - 2], 19) ~ (w[i - 2] >> 10)
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 0xffffffff
-    end
-    local a, b, c, d, e, f, g, h = h0, h1, h2, h3, h4, h5, h6, h7
-    for i = 1, 64 do
-      local S1 = rrot(e, 6) ~ rrot(e, 11) ~ rrot(e, 25)
-      local ch = (e & f) ~ ((~e) & g)
-      local t1 = (h + S1 + ch + K256[i] + w[i]) & 0xffffffff
-      local S0 = rrot(a, 2) ~ rrot(a, 13) ~ rrot(a, 22)
-      local maj = (a & b) ~ (a & c) ~ (b & c)
-      local t2 = (S0 + maj) & 0xffffffff
-      h, g, f, e, d, c, b, a = g, f, e, (d + t1) & 0xffffffff, c, b, a, (t1 + t2) & 0xffffffff
-    end
-    h0, h1, h2, h3 = (h0 + a) & 0xffffffff, (h1 + b) & 0xffffffff, (h2 + c) & 0xffffffff, (h3 + d) & 0xffffffff
-    h4, h5, h6, h7 = (h4 + e) & 0xffffffff, (h5 + f) & 0xffffffff, (h6 + g) & 0xffffffff, (h7 + h) & 0xffffffff
+local function siphash24(k0, k1, msg)
+  local v0 = k0 ~ 0x736f6d6570736575
+  local v1 = k1 ~ 0x646f72616e646f6d
+  local v2 = k0 ~ 0x6c7967656e657261
+  local v3 = k1 ~ 0x7465646279746573
+  local function round()
+    v0 = v0 + v1; v1 = rotl(v1, 13); v1 = v1 ~ v0; v0 = rotl(v0, 32)
+    v2 = v2 + v3; v3 = rotl(v3, 16); v3 = v3 ~ v2
+    v0 = v0 + v3; v3 = rotl(v3, 21); v3 = v3 ~ v0
+    v2 = v2 + v1; v1 = rotl(v1, 17); v1 = v1 ~ v2; v2 = rotl(v2, 32)
   end
-  return string.pack(">I4I4I4I4I4I4I4I4", h0, h1, h2, h3, h4, h5, h6, h7)
-end
-
-local function hmacSha256(key, msg)
-  if #key > 64 then key = sha256(key) end
-  key = key .. string.rep("\0", 64 - #key)
-  local ipad = key:gsub(".", function(c) return string.char(c:byte() ~ 0x36) end)
-  local opad = key:gsub(".", function(c) return string.char(c:byte() ~ 0x5c) end)
-  return sha256(opad .. sha256(ipad .. msg))
+  local len = #msg
+  local nblocks = len // 8
+  for i = 0, nblocks - 1 do
+    local m = string.unpack("<i8", msg, i * 8 + 1)
+    v3 = v3 ~ m; round(); round(); v0 = v0 ~ m
+  end
+  local last = (len & 0xff) << 56
+  for i = 1, len - nblocks * 8 do last = last | (msg:byte(nblocks * 8 + i) << ((i - 1) * 8)) end
+  v3 = v3 ~ last; round(); round(); v0 = v0 ~ last
+  v2 = v2 ~ 0xff
+  round(); round(); round(); round()
+  return v0 ~ v1 ~ v2 ~ v3
 end
 
 local function toHex(s) return (s:gsub(".", function(c) return string.format("%02x", c:byte()) end)) end
@@ -135,8 +117,11 @@ local function fromHex(s)
   return (s:gsub("%x%x", function(h) return string.char(tonumber(h, 16)) end))
 end
 
--- The MAC is the first 16 bytes of HMAC-SHA256(key, json bytes) as 32 hex characters.
-local function mac(key, text) return toHex(hmacSha256(key, text):sub(1, 16)) end
+-- key: the 32-byte pairing key (its first 16 bytes are the SipHash key). Returns 16 hex characters.
+local function mac(key, text)
+  local k0, k1 = string.unpack("<i8i8", key)
+  return string.format("%016x", siphash24(k0, k1, text))
+end
 
 -------------------------------------------------------------------------------
 -- Randomness (session ids, generation). Seeded once per start from the clock and os.time.
@@ -167,9 +152,15 @@ local NXK_KEYS = {
   Update = "UPDATE", Edit = "EDIT", Copy = "COPY", Move = "MOVE", Delete = "DELETE", Load = "LOAD",
   Cue = "CUE", Group = "GROUP", Macro = "MACRO", Fade = "FADE", Delay = "DELAY",
   HighLight = "HIGHLIGHT", Preview = "PREVIEW", Next = "NEXT", Last = "PREV", Menu = "MENU",
-  ["Snap Shot"] = "SNAPSHOT", Thru = "THRU", Full = "FULL", ["@"] = "AT", ["+"] = "PLUS", ["-"] = "MINUS",
-  ["."] = "DOT", ["/"] = "SLASH", Back = "BACKSPACE",
+  Thru = "THRU", Full = "FULL", ["@"] = "AT", ["+"] = "PLUS", ["-"] = "MINUS", ["."] = "DOT", ["/"] = "SLASH",
+  -- Fade, Delay, Snap Shot and Back have no MA3 hardkey (onPC 2.5.1 enum, read live 2026-10-09);
+  -- they are reported unsupported rather than mapped to something else.
 }
+-- The default profile maps two shortcuts with equal modifier count to PLUS, MINUS, DOT and SLASH
+-- (main row and keypad), which the resolver refuses as ambiguous. Both rows target the same MA key,
+-- so the keypad row is pressed as a raw PC key when the logical route is ambiguous and that row is
+-- one of the candidates. A raw hold has no route recheck (a remap during the hold is not noticed).
+local NXK_RAW_FALLBACK = { ["+"] = "kpAdd", ["-"] = "kpSubtract", ["."] = "kpDecimal", ["/"] = "kpDivide" }
 -- Keys the service may send that are not console keys (acknowledged unsupported, never an error).
 local NXK_LOCAL = { Bank = true, ["Swap Prog"] = true, Link = true, Rotary1 = true, Rotary2 = true, Rotary3 = true, Rotary4 = true }
 
@@ -236,7 +227,7 @@ local function decodePacket(key, data, maxLen)
   if type(data) ~= "string" then return nil, "not a string" end
   if #data > (maxLen or DEFAULTS.maxDatagram) then return nil, "oversized" end
   if data:sub(1, 5) ~= MAGIC .. " " then return nil, "bad-magic" end
-  local given, text = data:match("^MTX1 (%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x) (.*)$")
+  local given, text = data:match("^MTX1 (%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x) (.*)$")
   if not given then return nil, "bad-frame" end
   if mac(key, text) ~= given:lower() then return nil, "bad-mac" end
   local ok, obj = pcall(json.decode, text)
@@ -286,11 +277,26 @@ end
 local function describeKeys(logReasons)
   local inst = hk()
   local ok, unsupported, reasons = {}, {}, {}
+  state.rawKeys = {}
   for name, logical in pairs(NXK_KEYS) do
     local supported, reason = false, "hardkeys module not loaded"
     if inst then
       local okC, r = pcall(inst.describeKey, inst, logical)
       if okC and type(r) == "table" and r.supported then supported = true else reason = tostring(okC and (r and r.reason) or r) end
+      local raw = NXK_RAW_FALLBACK[name]
+      if not supported and raw and okC and type(r) == "table" and type(r.candidates) == "table" then
+        for _, c in ipairs(r.candidates) do
+          if c == raw then
+            local codes = nil
+            pcall(function() codes = Enums and Enums.KeyboardCodes end)
+            if codes == nil or codes[raw] ~= nil then
+              supported, reason = true, nil
+              state.rawKeys[name] = raw
+              if logReasons then log("key %s: logical %s is ambiguous (%s); pressing the keypad row %s as a raw PC key", name, logical, table.concat(r.candidates, ", "), raw) end
+            end
+          end
+        end
+      end
     end
     if supported then ok[#ok + 1] = name else unsupported[#unsupported + 1] = name; reasons[name] = reason end
   end
@@ -411,7 +417,8 @@ local function handleKey(s, obj, now)
   local inst = hk()
   if not inst or not state.inputEnabled then ackEvent(s, ev, false, { code = "input-disabled", why = "input is " .. tostring(state.inputMode) }); return nil end
   if down == 1 then
-    local r, err = inst:press(s.sid, now, { key = logical, display = state.display })
+    local spec = state.rawKeys[name] and { pcKey = state.rawKeys[name], display = state.display } or { key = logical, display = state.display }
+    local r, err = inst:press(s.sid, now, spec)
     if not r then
       state.counters.refused = state.counters.refused + 1
       ackEvent(s, ev, false, { code = tostring(err and err.code or "error"), why = tostring(err and err.message or err) })
@@ -918,7 +925,7 @@ local function Cleanup()
 end
 
 -- Exposed for the harness (stock Lua, stubbed socket): the pure functions and the loop pieces.
-state._sha256, state._hmac, state._toHex, state._fromHex = sha256, hmacSha256, toHex, fromHex
+state._siphash24, state._mac, state._toHex, state._fromHex = siphash24, mac, toHex, fromHex
 state._parseArgument, state._NXK_KEYS, state._DEFAULTS, state._VERSION = parseArgument, NXK_KEYS, DEFAULTS, VERSION
 state._describe, state._enableInput = describe, enableInput
 

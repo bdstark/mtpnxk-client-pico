@@ -24,14 +24,14 @@ package.preload["socket"] = function() return { gettime = function() return cloc
 -- Console stubs (the KB-01 default profile subset, plus EDIT mapped to E so a generic key resolves).
 local logs = {}
 Echo = function(m) logs[#logs + 1] = m end; ErrEcho = Echo; Printf = Echo; ErrPrintf = Echo
-Enums = { VirtualKeyCode = { PLEASE = 84, STORE = 66, ESC = 88, CLEAR = 87, OOPS = 86, EXEC = 35, EDIT = 40, COPY = 41, HIGHLIGHT = 50, MA1 = 1, MA2 = 2,
+Enums = { VirtualKeyCode = { PLEASE = 84, STORE = 66, ESC = 88, CLEAR = 87, OOPS = 86, EXEC = 35, EDIT = 40, COPY = 41, HIGHLIGHT = 50, PLUS = 77, MINUS = 79, MA1 = 1, MA2 = 2,
                              NUM0 = 67, NUM1 = 68, NUM2 = 69, NUM3 = 70, NUM4 = 71, NUM5 = 72, NUM6 = 73, NUM7 = 74, NUM8 = 75, NUM9 = 76 },
-          KeyboardCodes = { Enter = 257, Escape = 256, Delete = 261, Backspace = 259, S = 83, E = 69, LeftShift = 340, ["0"] = 48, ["1"] = 49, ["2"] = 50, ["3"] = 51, ["4"] = 52, ["5"] = 53, ["6"] = 54, ["7"] = 55, ["8"] = 56, ["9"] = 57 } }
+          KeyboardCodes = { Enter = 257, Escape = 256, Delete = 261, Backspace = 259, S = 83, E = 69, LeftShift = 340, Equal = 61, kpAdd = 334, Minus = 45, kpSubtract = 333, ["0"] = 48, ["1"] = 49, ["2"] = 50, ["3"] = 51, ["4"] = 52, ["5"] = 53, ["6"] = 54, ["7"] = 55, ["8"] = 56, ["9"] = 57 } }
 keyboardCalls = {}
 Keyboard = function(display, kind, key, shift, ctrl, alt, numlock) keyboardCalls[#keyboardCalls + 1] = { display = display, kind = kind, key = key, shift = shift, ctrl = ctrl, alt = alt } end
 local profile = { name = "Default", shortcutsActive = "true", rows = {
   { Shortcut = "Enter", KeyCode = 84 }, { Shortcut = "S", KeyCode = 66 }, { Shortcut = "Delete", KeyCode = 87 }, { Shortcut = "Backspace", KeyCode = 86 },
-  { Shortcut = "Escape", KeyCode = 88 }, { Shortcut = "E", KeyCode = 40 } } }
+  { Shortcut = "Escape", KeyCode = 88 }, { Shortcut = "E", KeyCode = 40 }, { Shortcut = "Equal", KeyCode = 77 }, { Shortcut = "kpAdd", KeyCode = 77 }, { Shortcut = "Minus", KeyCode = 79 }, { Shortcut = "kpSubtract", KeyCode = 79 } } }
 for d = 0, 9 do profile.rows[#profile.rows + 1] = { Shortcut = tostring(d), KeyCode = 67 + d } end
 local console = { cmdtext = "", blind = "false", highlight = "true", solo = "false", env = "Live", ma = false, page = "3", showFile = "show-a", user = "Admin", previewBar = "false", shortcuts = "true", cmdRaise = false }
 local function h(props) return { Get = function(_, k) return props[k] end } end
@@ -93,12 +93,15 @@ local function eventCount(kind) local n = 0; for _, e in ipairs(events()) do if 
 -------------------------------------------------------------------------------
 -- Crypto vectors
 -------------------------------------------------------------------------------
-check("sha256('abc')", state._toHex(state._sha256("abc")) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
-check("sha256('')", state._toHex(state._sha256("")) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855")
-check("sha256 two-block message", state._toHex(state._sha256("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")) == "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
-check("hmac RFC 4231 case 2", state._toHex(state._hmac("Jefe", "what do ya want for nothing?")) == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
-check("hmac RFC 4231 case 1", state._toHex(state._hmac(string.rep("\x0b", 20), "Hi There")) == "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
-check("hmac long key (hashed)", state._toHex(state._hmac(string.rep("\xaa", 131), "Test Using Larger Than Block-Size Key - Hash Key First")) == "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
+do
+  local k = ""; for i = 0, 15 do k = k .. string.char(i) end
+  local k0, k1 = string.unpack("<i8i8", k)
+  local function m(n) local s = ""; for i = 0, n - 1 do s = s .. string.char(i) end; return s end
+  check("siphash24 paper vector (15 bytes)", string.format("%016x", state._siphash24(k0, k1, m(15))) == "a129ca6149be45e5")
+  check("siphash24 empty message", string.format("%016x", state._siphash24(k0, k1, "")) == "726fdb47dd0e0e31")
+  check("siphash24 one full block", string.format("%016x", state._siphash24(k0, k1, m(8))) == "93f5f5799a932462")
+  check("mac uses the first 16 key bytes and 16 hex characters", #state._mac(k .. string.rep("\0", 16), m(15)) == 16 and state._mac(k .. string.rep("\0", 16), m(15)) == "a129ca6149be45e5")
+end
 check("fromHex rejects odd and non-hex", state._fromHex("abc") == nil and state._fromHex("zz") == nil and #state._fromHex(KEYHEX) == 32)
 
 -------------------------------------------------------------------------------
@@ -123,8 +126,9 @@ local out = drain()
 local welcome = ofType(out, "welcome")[1]
 check("hello answered with a welcome", welcome and welcome.nonce == hello.nonce and type(welcome.sid) == "string" and #welcome.sid == 16 and welcome.gen == state.gen and welcome.lease == 2000 and welcome.hb == 250, J(welcome))
 local function has(list, v) for _, x in ipairs(list or {}) do if x == v then return true end end return false end
-check("welcome reports key resolution as sorted lists", welcome and has(welcome.keys.ok, "Record") and has(welcome.keys.ok, "Enter") and has(welcome.keys.ok, "5") and has(welcome.keys.ok, "Edit") and has(welcome.keys.unsupported, "Copy") and has(welcome.keys.unsupported, "Bank") and has(welcome.keys.unsupported, "Update") and #welcome.keys.ok == 15, J(welcome and welcome.keys))
+check("welcome reports key resolution as sorted lists", welcome and has(welcome.keys.ok, "Record") and has(welcome.keys.ok, "Enter") and has(welcome.keys.ok, "5") and has(welcome.keys.ok, "Edit") and has(welcome.keys.unsupported, "Copy") and has(welcome.keys.unsupported, "Bank") and has(welcome.keys.unsupported, "Thru") and has(welcome.keys.ok, "+") and has(welcome.keys.ok, "-") and #welcome.keys.ok == 17, J(welcome and welcome.keys))
 check("unsupported reasons are logged at start, never guessed", state.keyReasons.Copy:find("no keyboard shortcut maps to COPY") and state.keyReasons.Update:find("not an Enums.VirtualKeyCode") and state.keyReasons.Bank == "not a console key" and findLog("key Copy unsupported"), J(state.keyReasons))
+check("an ambiguous keypad key falls back to the keypad row as a raw PC key", state.rawKeys["+"] == "kpAdd" and state.rawKeys["-"] == "kpSubtract" and state.rawKeys["."] == nil and findLog("pressing the keypad row kpAdd"), J(state.rawKeys))
 check("welcome fits the service's datagram limit", #outbox == 0 or true)
 check("welcome carries module versions, input mode, protocol", welcome and welcome.modules.gma3_mcp_hardkeys == "0.5.0" and welcome.input == "fake" and welcome.v == 1 and welcome.epoch == 1, J(welcome))
 check("keys physically down in the hello are not pressed", eventCount("press") == 0 and findLog("1 key%(s%) physically down, not pressed"))
@@ -135,7 +139,7 @@ for _, p in ipairs(ofType(drain(), "state")) do if p.full == 1 then first = p en
 check("after three frames every watched item is read", first and first.full == 1 and first.gen == state.gen and first.epoch == 1 and first.s.highlight == 1 and first.s.blind == 0 and first.s.preview == 0 and first.s.previewEnv == "Live" and first.s.page == 3 and first.s.pending == "" and first.s.freeze == "?" and first.s.ma == 0 and first.s.shortcuts == 1, J(first))
 sid, seq = welcome.sid, 0
 
-push("MTX1 " .. string.rep("0", 32) .. " " .. json.encode({ t = "hb", sid = sid, seq = 99 })); tick()
+push("MTX1 " .. string.rep("0", 16) .. " " .. json.encode({ t = "hb", sid = sid, seq = 99 })); tick()
 check("bad MAC is dropped before parsing (seq untouched)", state.counters.rejected == 1 and state.sessions[sid].lastSeq == 0 and #drain() == 0)
 push(string.rep("x", 600)); tick()
 check("oversized datagram dropped", state.counters.oversized == 1)
@@ -202,6 +206,10 @@ send({ t = "key", ev = 14, k = "Edit", d = 1 }); tick()
 ack = ofType(drain(), "ack")[1]
 check("a generic VirtualKeyCode key (Edit via E) is pressed", ack and ack.ok == 1 and events()[#events()].pcKey == "E", J(ack))
 send({ t = "key", ev = 15, k = "Edit", d = 0 }); tick(); drain()
+send({ t = "key", ev = 16, k = "+", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("'+' is pressed as the raw keypad key", ack and ack.ok == 1 and events()[#events()].pcKey == "kpAdd", J(ack))
+send({ t = "key", ev = 17, k = "+", d = 0 }); tick(); drain()
 
 -------------------------------------------------------------------------------
 -- Heartbeat reconciliation: lost release, lost press
@@ -274,7 +282,7 @@ drain()
 -------------------------------------------------------------------------------
 tick(1.1)
 send({ t = "key", ev = 300, k = "Record", d = 1 }); tick(); drain()
-for _ = 1, 10000 do inbox[#inbox + 1] = { data = "MTX1 " .. string.rep("1", 32) .. " {}", ip = "10.9.9.9", port = 5 } end
+for _ = 1, 10000 do inbox[#inbox + 1] = { data = "MTX1 " .. string.rep("1", 16) .. " {}", ip = "10.9.9.9", port = 5 } end
 local relBefore = eventCount("release")
 local t0 = os.clock()
 tick(2.05)
