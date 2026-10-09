@@ -53,6 +53,12 @@ the plugin (below).
 confirmed the Link LED blinking. After `Go+ Macro 110` the service re-paired
 on its next hello without a restart.
 
+**After the review fixes (same day):** plugin re-imported with hardkeys 0.5.0 `prefer`;
+the start log reports `+ - / .` resolved through `kpAdd`, `kpSubtract`, `kpDivide`,
+`kpDecimal` (shortcut-table route, 32 supported). A simulated `+` tap then `-` tap were
+both dispatched and acknowledged (no refusal, no retransmission); the command line read
+`- ` afterwards (the console replaced the operator), cleared with Escape.
+
 ## Not covered in this run
 
 Lost-connection cleanup timing on the console (harness only), a flood at the
