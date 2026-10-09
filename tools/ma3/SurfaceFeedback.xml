@@ -1,8 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<!-- Import wrapper for grandMA3: copy this file and SurfaceFeedback.lua into the
-     plugins folder of the MA3 user data, then import from the Plugins pool. -->
-<GMA3 DataVersion="2.0.0.0">
-	<Plugin Name="SurfaceFeedback" Version="0.1.0">
-		<ComponentLua Name="SurfaceFeedback" FileName="SurfaceFeedback.lua" />
-	</Plugin>
-</GMA3>

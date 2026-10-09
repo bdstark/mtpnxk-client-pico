@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Import wrapper for grandMA3 onPC. Copy this file and the three .lua files into the plugins folder
+     of the MA3 user library (macOS: ~/MALightingTechnology/gma3_library/datapools/plugins), then:
+       Import Plugin Library "mtpnxk_surface.xml" At Plugin <free slot>
+       Plugin "mtpnxk_surface" "key=<64 hex>"
+     The entry component must stay first: Plugin "<name>" calls the first component's function only.
+     The two gma3_mcp_* components are vendored from bdstark/GrandMA3MCP (see VENDOR.md). -->
+<GMA3 DataVersion="0.8.84.0">
+    <UserPlugin Name="mtpnxk_surface" Author="mtpnxk" Version="0.1.0">
+        <ComponentLua Name="mtpnxk_surface" FileName="mtpnxk_surface.lua" />
+        <ComponentLua Name="gma3_mcp_hardkeys" FileName="gma3_mcp_hardkeys.lua" />
+        <ComponentLua Name="gma3_mcp_feedback" FileName="gma3_mcp_feedback.lua" />
+    </UserPlugin>
+</GMA3>
