@@ -48,6 +48,11 @@ the service pairs within a frame of starting and the keypad keeps its last
 LED state, so the unpaired/stale indication was tested separately by stopping
 the plugin (below).
 
+**Stale indication:** with the keypad service running, the plugin was stopped
+(`Go+ Macro 111`); the service logged `link down` after 1.5 s and the operator
+confirmed the Link LED blinking. After `Go+ Macro 110` the service re-paired
+on its next hello without a restart.
+
 ## Not covered in this run
 
 Lost-connection cleanup timing on the console (harness only), a flood at the
