@@ -1,3 +1,3 @@
 [submodule "lib/Pico-PIO-USB"]
-	path = lib/Pico-PIO-USB
+	path = legacy/pico/lib/Pico-PIO-USB
 	url = https://github.com/sekigon-gonnoc/Pico-PIO-USB.git
