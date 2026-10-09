@@ -35,8 +35,8 @@ impl Default for Config {
             hello_interval: 2.0,
             watchdog: 1.5,
             repair_after: 4.0,
-            retransmits: 3,
-            retransmit_spacing: 0.025,
+            retransmits: 4,
+            retransmit_spacing: 0.06, // measured ack round trip on onPC: median 35 ms, p99 50 ms
             state_stale: 1.5,
         }
     }
@@ -594,21 +594,21 @@ mod tests {
         link.key_event("Record", false, 11.0);
         let first = plugin.decode(link.take_outgoing());
         let mut seqs = vec![first[0]["seq"].as_u64().unwrap()];
-        for i in 1..=3 {
-            link.tick(11.0 + 0.03 * i as f64);
+        for i in 1..=4 {
+            link.tick(11.0 + 0.07 * i as f64);
             let r = keys(plugin.decode(link.take_outgoing()));
             assert_eq!(r.len(), 1, "retransmit {i}");
             assert_eq!(r[0]["ev"], 2);
             seqs.push(r[0]["seq"].as_u64().unwrap());
         }
-        link.tick(11.2);
+        link.tick(11.4);
         assert!(keys(plugin.decode(link.take_outgoing())).is_empty(), "given up after the retransmit budget");
-        assert_eq!(link.stats.retransmitted, 3);
+        assert_eq!(link.stats.retransmitted, 4);
         assert_eq!(link.stats.lost, 1);
         assert!(seqs.windows(2).all(|w| w[1] > w[0]), "every copy carries a fresh seq: {seqs:?}");
         // A late ack for the lost event is harmless.
         let late = plugin.ack(2, true);
-        link.receive(&late, 11.3);
+        link.receive(&late, 11.5);
         assert_eq!(link.stats.acked, 2);
     }
 

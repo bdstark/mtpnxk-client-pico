@@ -62,7 +62,15 @@ median / p95 / p99 / worst.
   the lease, and a 100-tap bench (ack round trip median 9 ms, p99 26 ms
   through a 16 ms relay frame; press-to-effect samples come from the stub's
   synthetic command line and say nothing about the console yet).
-- Implemented and harness-tested, both sides. **Not yet run against onPC**:
+- **Run against onPC 2.5.1.0 on 2026-10-09** ([docs/probes/kb-07-live-macos-2.5.1.md](docs/probes/kb-07-live-macos-2.5.1.md)):
+  import and macro start work, 32 of 46 NX-K keys resolve on the default
+  profile, a simulated tap reaches the command line, benches at 2 and 10 taps/s
+  lose nothing (ack round trip median 35 ms, press-to-effect median 36–50 ms).
+  Two live findings changed the design: HMAC-SHA256 costs 20 ms per packet in
+  onPC's Lua, so the MAC is now SipHash-2-4; and the module's shortcut-table
+  re-read per event (7 ms) caps the plugin at roughly 10 taps/s. The NX-K opens
+  over nusb on macOS once the configuration is selected.
+- Earlier status, kept for the record. **Not yet run against onPC** before that run:
   the plugin has not been imported into a console, the `Keyboard()` route and
   the readers are exercised only through the vendored modules' own live
   evidence (KB-04/KB-06), and the NX-K has not been driven from the Rust
