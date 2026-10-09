@@ -1,13 +1,18 @@
-# KB-07 in mtpnxk: the surface consumer
+# KB-07 and KB-08 in mtpnxk: the surface consumer and its qualification
 
-Updated: 2026-10-09. The feature series KB-01 to KB-08 is defined and tracked in
+Updated: 2026-10-09. The feature series KB-01 to KB-09 is defined and tracked in
 [bdstark/GrandMA3MCP `KEYBOARD.md`](https://github.com/bdstark/GrandMA3MCP/blob/main/KEYBOARD.md).
 KB-01 to KB-06 are complete there (macOS, onPC 2.5.1.0) and provide the reusable
-console modules this repository vendors. KB-07, the surface consumer, lives here.
+console modules this repository vendors. KB-07 (the surface consumer) and KB-08
+(documentation and qualification of the surface) live here; KB-09 (shortcut-table
+cache, operator-managed profile shortcuts) is module work in the MCP repository.
 
 Direction change (2026-10-09): the consumer is a **cross-platform Rust service**
 on the PC, not Pico firmware. The Pico tree is archived under
 [legacy/pico](legacy/pico/ARCHIVED.md) and tagged `pico-firmware-final`.
+
+Operator documents produced by KB-08: [docs/operator-guide.md](docs/operator-guide.md),
+[docs/deployments.md](docs/deployments.md), [docs/kb-08-acceptance.md](docs/kb-08-acceptance.md).
 
 ## KB-07 — Integrate the independent mtpnxk surface consumer
 
@@ -18,7 +23,9 @@ LED state across network interruptions.
 needed. One reusable-module change was made in the MCP repository and
 re-vendored rather than forked: `gma3_mcp_hardkeys` 0.5.0 resolves any
 `Enums.VirtualKeyCode` name through the shortcut table (the NX-K's Edit, Copy,
-HighLight, … keys), with regressions in that repository's harness.
+HighLight, … keys) and lets the consumer prefer the row of a same-target tie
+(`+ - . /` on the keypad row), with regressions in that repository's harness
+(PR #12, merged as `6e0d9c1`).
 
 **Design:** [docs/surface-protocol.md](docs/surface-protocol.md). The six
 decisions it settles, in the order they were asked for:
@@ -26,13 +33,16 @@ decisions it settles, in the order they were asked for:
 1. Feedback schema reconciled against the KB-06 readers: tri-state items
    (`0`, `1`, `"?"`), derived `pending` and `preview`, units, unknown/stale
    rules, protocol and module versions (section 1).
-2. Pairing and packet semantics: HMAC-SHA256 over every datagram with a
-   32-byte pairing key, fresh random session ids, strictly increasing sequence
-   numbers, event ids with retransmission, acks, lease and forget times,
-   validation before any module call (section 2).
+2. Pairing and packet semantics: a SipHash-2-4 MAC over every datagram under
+   the first 16 bytes of a 32-byte pairing key (HMAC-SHA256 was the first
+   choice and cost 20 ms per packet in onPC's Lua), fresh random session ids,
+   strictly increasing sequence numbers, event ids with retransmission
+   (4 × 60 ms), acks, lease and forget times, validation before any module
+   call (section 2).
 3. Event delivery separated from held-key reconciliation: duplicates
-   deduplicated, releases owner-scoped, heartbeats release lost releases and
-   never press, nothing replayed after either side restarts (section 3).
+   deduplicated, superseded events refused, releases owner-scoped, heartbeats
+   release lost releases and never press, nothing replayed after either side
+   restarts, unresolved releases kept as records across restarts (section 3).
 4. Loop budget: deadlines first, feedback reads spread over frames, bounded
    packets per frame, per-session rate limit, auth-failure throttle (section 4).
 5. Freshness: plugin generation + feedback epoch, stale and identity-uncertain
@@ -42,50 +52,43 @@ decisions it settles, in the order they were asked for:
    bridge that is explicitly not arbitration (section 6).
 
 Measurable limits (press latency, ack round trip, cleanup, LED freshness,
-stale indication, flood resilience) are chosen in section 8 and reported as
-median / p95 / p99 / worst.
+stale indication, flood resilience) are chosen in section 8, which now also
+carries each limit's measured status.
 
 ### Implementation
 
 | Part | Where | Verified by |
 | --- | --- | --- |
-| Surface plugin (Lua, runs in onPC) | [tools/ma3/mtpnxk_surface.lua](tools/ma3/mtpnxk_surface.lua), [mtpnxk_surface.xml](tools/ma3/mtpnxk_surface.xml) | `lua tools/ma3/test/surface_plugin_test.lua` — 87 checks under stock Lua with stubbed console and socket: crypto vectors, pairing/replay/MAC rejection, press/release/dedup/old-seq/reordering, unsupported keys, heartbeat reconciliation (lost release released, lost press reported not pressed), lease expiry/revival/forgetting, restart via new hello, capacity, per-session rate limit, a 10 000-datagram flood not starving a lapsed lease, feedback deltas/full/unknown/stalled reader/epoch bump/identity uncertainty, keyboard backend calls, bench mode, the bridge courtesy check, two independent instances, allow list, control calls and Cleanup |
-| Vendored console modules | [tools/ma3/gma3_mcp_hardkeys.lua](tools/ma3/gma3_mcp_hardkeys.lua) 0.5.0, [gma3_mcp_feedback.lua](tools/ma3/gma3_mcp_feedback.lua) 0.2.0, [VENDOR.md](tools/ma3/VENDOR.md) | the MCP repository's harnesses (`npm test` there, 362 + 149 + 360 Lua checks) |
-| Surface service (Rust) | [service](service) — `auth` (framing/HMAC), `protocol`, `link` (pairing, seq/ev, retransmit, heartbeat, watchdog, state cache), `leds` (NX-K map, local fallback), `nxk` (decoder, USB via nusb), `sim`/`bench` | `cargo test` — 18 tests incl. a fake plugin exercising retransmission and loss, nonce mismatch, old seqs, full/delta/epoch freshness, watchdog and re-pairing, `no-session` recovery, forged packets, LED diffs and the local fallback |
+| Surface plugin (Lua, runs in onPC) | [tools/ma3/mtpnxk_surface.lua](tools/ma3/mtpnxk_surface.lua) 0.1.0, [mtpnxk_surface.xml](tools/ma3/mtpnxk_surface.xml) | `lua tools/ma3/test/surface_plugin_test.lua` — 107 checks under stock Lua with stubbed console and socket: SipHash vectors, pairing/replay/MAC rejection, press/release/dedup/old-seq/reordering/superseded, duplicate acks replaying the original outcome, unsupported keys, heartbeat reconciliation (lost release released, lost press reported not pressed), lease expiry/revival/forgetting, restart via new hello, capacity, per-session rate limit, a 10 000-datagram flood not starving a lapsed lease, feedback deltas/full/unknown/stalled reader/epoch bump/identity uncertainty, keyboard backend calls, bench mode, the bridge courtesy check, two independent instances, allow list, kept records adopted across a restart, `recover`, a quarantined instance whose `dispose()` raises, control calls and Cleanup |
+| Vendored console modules | [tools/ma3/gma3_mcp_hardkeys.lua](tools/ma3/gma3_mcp_hardkeys.lua) 0.5.0, [gma3_mcp_feedback.lua](tools/ma3/gma3_mcp_feedback.lua) 0.2.0, [VENDOR.md](tools/ma3/VENDOR.md) (commits and hashes) | the MCP repository's harnesses (`npm test` there) |
+| Surface service (Rust) | [service](service) — `auth` (framing, SipHash), `protocol`, `link` (pairing, seq/ev, retransmit, heartbeat, watchdog, state cache), `leds` (NX-K map, local fallback), `nxk` (decoder, USB via nusb), `sim`/`bench` | `cargo test` — 19 tests incl. a fake plugin exercising retransmission and loss, a release stopping its press's retransmission, nonce mismatch, old seqs, full/delta/epoch freshness, watchdog and re-pairing, `no-session` recovery, forged packets, LED diffs and the local fallback |
+| The two together, no console | [tools/ma3/test/e2e.sh](tools/ma3/test/e2e.sh) | the real plugin under stock Lua with a stubbed console behind a UDP relay, driven by the real service: pairing, acks, a retransmission with zero losses, two refused keys, an abandoned session released by the lease, a 100-tap bench |
 
 ### Status
 
-- **Verified end to end without a console** (`sh tools/ma3/test/e2e.sh`): the real
-  plugin under stock Lua with a stubbed console, behind `udp_pipe_bridge.py` on a
-  real UDP port, driven by the real service. Pairing, acks, a retransmission
-  with zero losses, two refused local keys, an abandoned session released by
-  the lease, and a 100-tap bench (ack round trip median 9 ms, p99 26 ms
-  through a 16 ms relay frame; press-to-effect samples come from the stub's
-  synthetic command line and say nothing about the console yet).
-- **Run against onPC 2.5.1.0 on 2026-10-09** ([docs/probes/kb-07-live-macos-2.5.1.md](docs/probes/kb-07-live-macos-2.5.1.md)):
-  import and macro start work, 32 of 46 NX-K keys resolve on the default
-  profile, a simulated tap reaches the command line, benches at 2 and 10 taps/s
-  lose nothing (ack round trip median 35 ms, press-to-effect median 36–50 ms).
-  Two live findings changed the design: HMAC-SHA256 costs 20 ms per packet in
-  onPC's Lua, so the MAC is now SipHash-2-4; and the module's shortcut-table
-  re-read per event (7 ms) caps the plugin at roughly 10 taps/s. The NX-K opens
-  over nusb on macOS once the configuration is selected.
-- Earlier status, kept for the record. **Not yet run against onPC** before that run:
-  the plugin has not been imported into a console, the `Keyboard()` route and
-  the readers are exercised only through the vendored modules' own live
-  evidence (KB-04/KB-06), and the NX-K has not been driven from the Rust
-  service (nusb path untested on hardware; Windows needs WinUSB via Zadig).
+- **Verified end to end without a console** (`sh tools/ma3/test/e2e.sh`), see the
+  table above (press-to-effect samples come from the stub's synthetic command
+  line and say nothing about the console).
+- **First run against onPC 2.5.1.0 on 2026-10-09**
+  ([docs/probes/kb-07-live-macos-2.5.1.md](docs/probes/kb-07-live-macos-2.5.1.md),
+  historical evidence): import and macro start work, 32 of 46 NX-K keys resolve
+  on the default profile, a simulated tap reaches the command line, benches at
+  2 and 10 taps/s lose nothing, the NX-K opens over nusb on macOS once the
+  configuration is selected, and the operator confirmed the LEDs on the keypad
+  (Record while Store pending, Clear while held, HighLight blinking, Bank and
+  the encoder LEDs, the Link LED blinking when the plugin stops). Two findings
+  changed the design during that day: HMAC-SHA256 → SipHash-2-4, and the
+  module's shortcut-table re-read per event (7 ms) caps the plugin at roughly
+  10 taps/s (KB-09). The record's "keypad row as a raw PC key" workaround was
+  removed in the review below.
+- **Qualified in KB-08** on the final revision: see below.
 - Wheels are carried in the protocol and acknowledged `unsupported`: no
-  verified Lua route for encoder input exists (needs a probe).
-- The VirtualKeyCode names for Update, Edit, Copy, Move, Delete, Load, Cue,
-  Group, Macro, Fade, Delay, HighLight, Preview, Next, Last, Menu, Snap Shot,
-  Thru, Full, @, +, −, ., / and Back are **unverified**; the plugin reports
-  each at start (`key X unsupported: …`) and in `welcome.keys`. Keys without a
-  default shortcut need a profile mapping by the operator.
-- Qualification (section 8 limits) has not been measured. Tooling exists:
-  `mtpnxk bench` plus the plugin's `bench` start option.
+  verified Lua route for encoder input exists (separate work).
+- Fade, Delay, Snap Shot and Back are not MA3 hardkeys; Load, Macro and Thru
+  have no shortcut in the default profile and need one in the user profile
+  (KB-09 part B plans an assisted way).
 
-### Review of 2026-10-09 (four findings, all fixed)
+### Review of 2026-10-09 (five findings, all fixed)
 
 1. A retransmitted press could execute after its release: event ids now order the events of a key
    (older than the newest processed → `superseded`, nothing dispatched), and the service stops
@@ -97,32 +100,77 @@ median / p95 / p99 / worst.
    0.5.0's `spec.prefer` with enablement, collision and route rechecks intact.
 4. A retransmitted refusal was acknowledged as success: the original acknowledgment is cached per
    event id and replayed.
-
 5. (second pass) A `dispose()` that raises no longer loses ownership: the instance is quarantined with
    its records, input is blocked at the next start, and `recover` exports and releases them before
    re-enabling the requested input mode.
 
 Harness: 107 checks (was 87); service: 19 tests; `e2e.sh` passes. The shared module's preference change
-is pushed as GrandMA3MCP `2d226dd` (PR #12) and the vendored copy matches it byte for byte.
+is pushed as GrandMA3MCP `2d226dd` (PR #12, merged) and the vendored copy matches it byte for byte.
 
-### Follow-ups filed
+### Open defects found by KB-08 (owned here, not fixed in KB-08)
 
-- [bdstark/GrandMA3MCP#12](https://github.com/bdstark/GrandMA3MCP/pull/12): hardkeys 0.5.0 (the vendored version) and the
+- **D1, bench instrument.** `bench` mode snapshots `cmdtext` after `hardkeys:press()` returns; a key the
+  console applies within that call is invisible to the watch and the sample inherits the next tap's
+  change. At 10 taps/s this produced a measured press-to-effect p99 of 156 ms (n=359) while an independent
+  poller showed every tap landing. Fix the snapshot order, rerun with ≥ 360 samples, and report p99
+  again; until then the p99 ≤ 120 ms limit is **not demonstrated**.
+- **D2, flood handling.** The auth-failure throttle is per source address (a flood from the service's own
+  address locks the service out for 10 s), and the 32-datagram read budget per iteration lets a 2000 pps
+  flood from another address queue legitimate packets in the kernel past the retransmit budget (98 of
+  195 events lost). The flood limit of section 8 is **not met**; decide between a time-bounded read
+  budget that discards ignored sources cheaply, a deployment-specific limit, or a revised limit.
+
+## KB-08 — Document and qualify supported deployments
+
+**Request:** As a user, I want an accurate setup and compatibility statement for the delivered capabilities.
+
+**Lua changes: none.** Documentation and qualification only; the two defects above are recorded
+against KB-07. Caching (KB-09), automatic shortcut creation (KB-09 part B) and encoder support stay
+separate.
+
+**Delivered (2026-10-09):**
+
+1. Documentation reconciled with the implementation: SipHash instead of HMAC, the raw-key workaround
+   gone, 107 harness checks and 19 service tests, the protocol's retransmit parameters, section 8 with
+   measured status, VENDOR.md with commits and hashes; the MCP repository's module pin, lock file,
+   example version checks and compatibility matrix updated to hardkeys 0.5.0 and the surface
+   evidence. The KB-07 probe record is kept unchanged as history.
+2. The performance discrepancy resolved: the KB-07 table had used the 40-tap p95 (67 ms) as p99; the
+   p99 was 183 ms. The rerun at the final revision with 359 samples measures 51 / 105 / 156 / 158 ms
+   and is reported as not meeting the p99 limit, with the tail traced to defect D1
+   ([docs/probes/kb-08-qualification-macos-2.5.1.md](docs/probes/kb-08-qualification-macos-2.5.1.md) §1).
+3. Lifecycle observed on the console (same record, §2): clean service stop, cable pull (lease release
+   1.99 s), plugin stop/restart with a physically held key (stale LED, re-pairing, no replay), user
+   switch (feedback invalidated within 1 s), LED freshness (≈ 126 ms median), `status`/`recover`, the
+   allow list. Exception and quarantine paths stay harness-tested and are labelled so.
+4. A specific deployment matrix: [docs/deployments.md](docs/deployments.md) (MCP vs surface,
+   same machine vs LAN, macOS/Windows/Linux, layouts, profiles, displays, hardware), with every
+   untested combination named as unqualified.
+5. An operator guide: [docs/operator-guide.md](docs/operator-guide.md) (install and update all three
+   plugin components, pairing key, USB, supported and unmapped keys, exclusive input, status, stop,
+   `recover`, what to do when something stays unresolved; `force` kept out of the normal start).
+6. A reproducible acceptance record: [docs/kb-08-acceptance.md](docs/kb-08-acceptance.md) (commits,
+   hashes, environments, commands, results, verdicts, exclusions; the real-service/stubbed-console
+   e2e run beside the Lua and Rust suites).
+
+**Closed** with the macOS beta scope of docs/deployments.md and the exclusions listed there and in the
+acceptance record. Not closed as a pass on the p99 or flood limits.
+
+## Follow-ups filed
+
+- [bdstark/GrandMA3MCP#12](https://github.com/bdstark/GrandMA3MCP/pull/12) (merged): hardkeys 0.5.0 and the
   **KB-09** write-up: bounded per-iteration cache of the shortcut rows (lifts the ~10 taps/s ceiling), same-target tie
-  resolution so `+ - . /` stop needing the raw-key workaround here, and operator-managed profile shortcuts for Load, Macro
-  and Thru (read-only report of free PC keys first; row writing only behind an opt-in and a live probe).
-- KB-08 (documentation and qualification) starts next and takes the remaining qualification items: lost-connection
-  cleanup timing on the console, a flood at the console, Windows with WinUSB, a second display, non-US layouts.
+  resolution, and operator-managed profile shortcuts for Load, Macro and Thru.
+- KB-07 defects D1 and D2 above.
+- Unqualified deployments (Windows with WinUSB, a separate LAN host, a second display, non-US layouts,
+  show reload with the plugin running) each need a recorded run before they are claimed.
 
-### Next steps
+## Next steps
 
-1. On the onPC Mac: copy `tools/ma3/*.lua` and the XML into
-   `~/MALightingTechnology/gma3_library/datapools/plugins`, import, start with
-   `key=<64 hex> input=fake bench`, run `mtpnxk sim` then `mtpnxk bench`
-   from the same machine; record the `key … unsupported` lines and fix the
-   VirtualKeyCode table. Then `input=keyboard` on a disposable show.
-2. Plug in the NX-K, `mtpnxk run`, confirm LEDs follow pending keywords,
-   HighLight and the Link LED; record the section 8 numbers in `docs/probes/`.
-3. Probe encoder input (`Encoder` keyword or an attribute-level call) before
-   routing wheels; keep them unsupported until a route is verified.
-4. KB-08 documentation and the Windows qualification.
+1. Fix D1 in the plugin's bench mode, rerun `mtpnxk bench --taps 400 --rate 10` on the console and
+   update section 8 and the acceptance record.
+2. Decide D2 (read budget, throttle scope or limit) and re-measure the flood case.
+3. With the NX-K attached, repeat the hands-on LED checks at the final revision and add them to the
+   KB-08 record.
+4. Windows qualification (WinUSB via Zadig) and a separate-machine LAN run when hardware allows.
+5. Probe encoder input before routing wheels; keep them unsupported until a route is verified.

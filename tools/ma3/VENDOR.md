@@ -8,8 +8,12 @@ key routes, ownership and leases, read-only state readers. The surface plugin
 
 | Component | Version | Module API | Copied from |
 | --- | --- | --- | --- |
-| `gma3_mcp_hardkeys` | 0.5.0 | 1 | `2d226dd` on branch `feat/kb07-generic-vk` (PR #12: generic VirtualKeyCode resolution and `prefer` for same-target ties) |
-| `gma3_mcp_feedback` | 0.2.0 | 1 | `c18559a` |
+| `gma3_mcp_hardkeys` | 0.5.0 | 1 | `2d226dd` (PR #12, merged into `main` as `6e0d9c1`: generic VirtualKeyCode resolution and `prefer` for same-target ties); sha256 `d73a8e10a53260275b9bf45b9182cb5601b48843646ec1812376ff1095f6266e` |
+| `gma3_mcp_feedback` | 0.2.0 | 1 | `c18559a` (unchanged through `6e0d9c1`); sha256 `349bb2ed1cc88bdbaf197aa20e957811df44306133c04652663da01a585d2cf9` |
+
+Upstream's `plugin/modules.lock.json` carries the same hashes. Check them before
+packaging (`shasum -a 256 tools/ma3/gma3_mcp_*.lua`): the version strings alone do
+not identify a revision.
 
 Rules (from that repository's `docs/modules.md`, "Vendoring into another plugin"):
 
@@ -26,4 +30,5 @@ Rules (from that repository's `docs/modules.md`, "Vendoring into another plugin"
    cp ../GrandMA3/plugin/gma3_mcp_hardkeys.lua ../GrandMA3/plugin/gma3_mcp_feedback.lua tools/ma3/
    ```
 
-   then update the table above and run `lua tools/ma3/test/surface_plugin_test.lua`.
+   then update the table above (version, commit, sha256) and run
+   `lua tools/ma3/test/surface_plugin_test.lua` and `sh tools/ma3/test/e2e.sh`.

@@ -7,7 +7,7 @@ Cross-platform Rust process that owns the NX-K keypad over USB and talks to the
 ```bash
 cargo build --release
 ./target/release/mtpnxk keygen                      # a fresh 64-hex pairing key
-./target/release/mtpnxk --key <hex> run             # drive the USB keypad
+./target/release/mtpnxk --key-file ~/.mtpnxk.key run # drive the USB keypad (or --key <hex>)
 ./target/release/mtpnxk --key <hex> sim --script "Record:down,5:tap@50,Record:up@300,Enter:tap"
 ./target/release/mtpnxk --key <hex> bench --taps 200 --rate 20
 ./target/release/mtpnxk list                        # USB devices
@@ -30,9 +30,10 @@ Plugin "mtpnxk_surface" "key=<hex>"
   request. USB access is [nusb](https://crates.io/crates/nusb): no libusb.
   Windows needs the WinUSB driver bound to the keypad (Zadig); macOS and
   Linux need nothing (Linux may need a udev rule for non-root access).
-- `link`: pairing (hello/welcome with nonce), HMAC on every datagram, strictly
-  increasing sequence numbers, event ids retransmitted until acknowledged
-  (3 × 25 ms, then counted lost), heartbeats with the physically held keys,
+- `link`: pairing (hello/welcome with nonce), a SipHash-2-4 MAC on every
+  datagram, strictly increasing sequence numbers, event ids retransmitted until
+  acknowledged (4 × 60 ms, then counted lost; a press stops being retransmitted
+  once its release is sent), heartbeats with the physically held keys,
   a 1.5 s watchdog, re-pairing after 4 s of silence or a `no-session` error,
   and the console-state cache keyed on the plugin generation and feedback
   epoch.
@@ -44,5 +45,7 @@ Plugin "mtpnxk_surface" "key=<hex>"
   scripted tap run that prints ack round-trip percentiles and, when the plugin
   was started with `bench`, press-to-effect percentiles.
 
-`cargo test` runs the unit tests, including a fake plugin that exercises the
-link's retransmission, loss, freshness and re-pairing paths.
+`cargo test` runs the 19 unit tests, including a fake plugin that exercises the
+link's retransmission, loss, freshness and re-pairing paths. Operator setup and
+recovery: [docs/operator-guide.md](../docs/operator-guide.md); qualified
+deployments: [docs/deployments.md](../docs/deployments.md).

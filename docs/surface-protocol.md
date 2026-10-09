@@ -1,4 +1,4 @@
-# Surface protocol and KB-07 design (2026-10-09)
+# Surface protocol and KB-07 design (2026-10-09, status updated by KB-08)
 
 How a surface service (the Rust process that owns the NX-K) and the
 `mtpnxk_surface` Lua plugin inside grandMA3 onPC talk to each other, what each
@@ -149,8 +149,9 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
   was already released). `ok:0` carries the module's error `code`
   (`unsupported`, `input-disabled`, `conflict`, `exclusive-hold`,
   `route-changed`, `capacity`, …).
-- The service retransmits an unacknowledged `key` event up to 3 times at 25 ms
-  spacing, then drops it and counts it as lost. `wheel` events are never
+- The service retransmits an unacknowledged `key` event up to 4 times at 60 ms
+  spacing (the measured ack round trip on onPC is 34 ms median, 53 ms p99), then
+  drops it and counts it as lost. `wheel` events are never
   retransmitted (a stale wheel delta is worse than a lost one).
 - Everything else (`hb`, `state`, `err`) is unacknowledged.
 
@@ -321,7 +322,7 @@ repository (PR #12) and re-vendored, not forked here. Fade, Delay, Snap Shot
 and Back are not MA3 hardkeys and stay unsupported; Load, Macro and Thru need
 a shortcut in the user profile.
 
-## 8. Measurable limits (chosen before qualification)
+## 8. Measurable limits and their status
 
 Measured on the target setup (service on the onPC machine or on the LAN,
 onPC 2.5.1.0), under load = 10 taps/s from the service plus the full NX-K
@@ -333,17 +334,21 @@ and the vendored module's shortcut-table re-read before every press and
 release costs about 7 ms per event on this console, so 20 taps/s saturates
 the plugin frame; human keypad use stays below 5 events/s.)
 
-| Measure | How measured | Limit |
-| --- | --- | --- |
-| Press latency, service → console effect | service timestamps the press event; plugin `bench` mode polls `cmdtext` after a `NUM` tap and reports the frame it changed (`effect` packet) | median ≤ 60 ms, p99 ≤ 120 ms, worst ≤ 250 ms (measured 2026-10-09 at 10 taps/s: 50 / 67 / 183 ms) |
-| Ack round trip | event sent → ack received, at the service | median ≤ 50 ms, p99 ≤ 100 ms (measured: 34 / 51 ms) |
-| Lost-connection cleanup | service stops sending (simulated cable pull); plugin logs the frame every hold of the session was released | ≤ lease (2000 ms) + 1 frame; p99 ≤ 2100 ms |
-| LED freshness | a console change (Blind toggled on the console) → `state` delta received by the service | median ≤ 250 ms, p99 ≤ 500 ms |
-| Stale indication | plugin stopped → Link LED blinking | ≤ 1500 ms |
-| Flood resilience | 2000 packets/s of unauthenticated datagrams at the plugin for 10 s | ack round trip p99 stays ≤ 150 ms; no hold outlives its release by more than 1 frame |
+| Measure | How measured | Limit | Status (KB-08, 2026-10-09) |
+| --- | --- | --- | --- |
+| Press latency, plugin dispatch → console effect | plugin `bench` mode polls `cmdtext` after a `NUM` press and reports the frame it changed (`effect` packet); timed in the plugin from its dispatch, so the service→plugin leg is excluded | median ≤ 60 ms, p99 ≤ 120 ms, worst ≤ 250 ms at 10 taps/s | median **met** (51 ms); p99 **not demonstrated**: 156 ms, n=359. The tail follows the tap interval and is attributed to the instrument's snapshot order (defect D1 in [kb-08-acceptance.md](kb-08-acceptance.md)); at 1 tap/s p99 is 53 ms with the affected taps reported as unmeasured |
+| Ack round trip | event sent → ack received, at the service | median ≤ 50 ms, p99 ≤ 100 ms | **met**: 33.5 / 53.3 ms (n=798 at 10 taps/s) |
+| Lost-connection cleanup | service stops sending (simulated cable pull); the plugin releases every hold of the session when the lease expires | ≤ lease (2000 ms) + 1 frame; p99 ≤ 2100 ms | **met**: 1.99 s after the last packet (one sample, 50 ms poll) |
+| LED freshness | a console change (Highlight toggled on the console) → LED write at the service | median ≤ 250 ms, p99 ≤ 500 ms | **met**: ≈ 126 ms median, 194 ms worst (n=8, upper bounds including the command's own delivery) |
+| Stale indication | plugin stopped → Link LED blinking | ≤ 1500 ms | **met**: watchdog at 1.5 s, Link LED write observed (KB-08), physical LED observed (KB-07) |
+| Flood resilience | 2000 packets/s of unauthenticated datagrams at the plugin for 10 s | ack round trip p99 stays ≤ 150 ms; no hold outlives its release by more than 1 frame | **not met**: from the service's own address the throttle locks the service out for 10 s; from another address the 32-datagram read budget per iteration lets the kernel queue delay legitimate packets (98 of 195 events lost). Defect D2, owned by KB-07 |
+
+Measurements, procedure and the honest tail analysis are in
+[probes/kb-08-qualification-macos-2.5.1.md](probes/kb-08-qualification-macos-2.5.1.md);
+the first run at a smaller sample is [probes/kb-07-live-macos-2.5.1.md](probes/kb-07-live-macos-2.5.1.md).
 
 The harness proves the logic (lost releases, reordering, duplicates, floods,
 feedback stalls, restarts, capacity, two consumers); the limits above are
-measured live with `service bench` and the plugin's `bench=1` mode, and the
-numbers are recorded in `docs/probes/` before the integration is called
-complete.
+measured live with `mtpnxk bench` and the plugin's `bench` start option, and the
+numbers are recorded in `docs/probes/`. A limit that is not met is reported as
+such, never trimmed into a pass.
