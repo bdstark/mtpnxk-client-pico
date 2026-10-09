@@ -8,7 +8,7 @@ key routes, ownership and leases, read-only state readers. The surface plugin
 
 | Component | Version | Module API | Copied from |
 | --- | --- | --- | --- |
-| `gma3_mcp_hardkeys` | 0.5.0 | 1 | `f15a93e` on branch `feat/kb07-generic-vk` (PR #12: generic VirtualKeyCode resolution and `prefer` for same-target ties) |
+| `gma3_mcp_hardkeys` | 0.5.0 | 1 | `2d226dd` on branch `feat/kb07-generic-vk` (PR #12: generic VirtualKeyCode resolution and `prefer` for same-target ties) |
 | `gma3_mcp_feedback` | 0.2.0 | 1 | `c18559a` |
 
 Rules (from that repository's `docs/modules.md`, "Vendoring into another plugin"):

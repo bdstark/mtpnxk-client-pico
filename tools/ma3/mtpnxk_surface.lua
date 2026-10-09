@@ -716,9 +716,36 @@ local function detachHardkeys(reason, now)
       logerr("keeping unresolved record %s(%s) of session %s: %s", tostring(record.logical or "raw"), tostring(record.tupleKey), tostring(record.session), tostring(record.unresolved and record.unresolved.reason))
     end
     if #(r.records or {}) > 0 then logerr("%d unresolved release record(s) kept; they are adopted at the next start and released by  Plugin \"mtpnxk_surface\" \"recover\"", #r.records) end
-  elseif not ok then logerr("dispose failed on %s: %s", reason, tostring(r)) end
+  else
+    -- dispose() raised (or returned nothing): the instance still owns its records, so it is kept in
+    -- quarantine instead of being dropped. New input stays blocked until "recover" exports them.
+    state.quarantine = { instance = inst, reason = reason, at = now, error = tostring(r) }
+    logerr("dispose failed on %s: %s; the instance is quarantined with its ownership records and input stays blocked until  Plugin \"mtpnxk_surface\" \"recover\"  exports them", reason, tostring(r))
+  end
   rec.instance = nil
   state.inputEnabled = false
+end
+
+-- Tries to take the records out of a quarantined instance (a release attempt first, then dispose).
+-- Returns true when the quarantine is clear.
+local function exportQuarantine(t)
+  local q = state.quarantine
+  if not q then return true end
+  local inst = q.instance
+  pcall(inst.recover, inst, nil, t)
+  local ok, r = pcall(inst.dispose, inst, t)
+  if not ok or type(r) ~= "table" then
+    logerr("quarantined instance still cannot be disposed (%s); input stays blocked", tostring(r))
+    return false
+  end
+  state.unresolved = state.unresolved or {}
+  for _, record in ipairs(r.records or {}) do
+    record.keptAt, record.keptReason = t, "quarantine"
+    state.unresolved[#state.unresolved + 1] = record
+  end
+  log("quarantined instance exported %d record(s)", #(r.records or {}))
+  state.quarantine = nil
+  return true
 end
 
 local function serviceModules(now)
@@ -835,6 +862,8 @@ local function adoptKept(t)
   for _, a in ipairs(r.adopted or {}) do log("adopted unresolved record %s(%s): its key stays reserved until \"recover\" releases it", tostring(a.logical or "raw"), tostring(a.tupleKey)) end
 end
 
+local enableInput  -- defined below; recover re-enables the requested input after a quarantine clears
+
 -- Operator recovery: re-attempt every unresolved release (adopted or current). Without input enabled
 -- the keyboard backend is attached for cleanup only; input stays as configured.
 local function recoverUnresolved()
@@ -842,7 +871,23 @@ local function recoverUnresolved()
   local inst = rec and rec.instance
   if not inst then logerr("recover: the plugin is not running (start it first; kept records are adopted at start)"); return end
   local t = now()
+  local wasBlocked = state.quarantine ~= nil
+  if not exportQuarantine(t) then return end
   adoptKept(t)
+  if wasBlocked and state.inputRequested and state.inputRequested ~= "off" and not state.inputEnabled then
+    log("recover: quarantine cleared; enabling the input mode requested at start (%s)", state.inputRequested)
+    enableInput(state.inputRequested, state.forceRequested)
+    inst = rec.instance
+    -- Surfaces paired while input was blocked have no module session yet.
+    if state.inputEnabled then
+      for _, s in pairs(state.sessions) do
+        if not s.sessionOpen then
+          local r = inst:openSession({ id = s.sid, leaseMs = DEFAULTS.leaseMs, label = s.id, binding = s.ip .. ":" .. tostring(s.port) }, t)
+          s.sessionOpen = r ~= nil
+        end
+      end
+    end
+  end
   local st = inst:status(t)
   if not st.backend.attached then
     local HK = rec.module
@@ -862,7 +907,7 @@ local function bridgeInputEnabled()
   return type(b) == "table" and b.running == true and type(b.input) == "table" and b.input.enabled == true
 end
 
-local function enableInput(mode, force)
+enableInput = function(mode, force)
   state.inputMode = mode
   state.inputEnabled = false
   if mode == "off" then log("input off: no console key will be pressed (feedback only)"); return true end
@@ -950,8 +995,15 @@ local function start(opts)
     log("feedback: watching %d item(s)", w.watched)
   end
   state.commandText = function() return CmdObj().cmdtext end
-  adoptKept(now())
-  enableInput(opts.input, opts.force)
+  state.inputRequested, state.forceRequested = opts.input, opts.force
+  local t = now()
+  if exportQuarantine(t) then
+    adoptKept(t)
+    enableInput(opts.input, opts.force)
+  else
+    state.inputMode, state.inputEnabled = "off", false
+    logerr("input blocked: a previous instance still owns key records it could not export; run  Plugin \"mtpnxk_surface\" \"recover\"")
+  end
   describeKeys(true)
   return true
 end
@@ -968,6 +1020,7 @@ local function MainImpl(display_handle, argument)
   if opts.command == "status" then
     log("%s", describe())
     if state.unresolved and #state.unresolved > 0 then log("%d unresolved record(s) kept from a previous run (not adopted yet)", #state.unresolved) end
+    if state.quarantine then logerr("a previous instance is quarantined (%s: %s); input is blocked until  recover  exports its records", tostring(state.quarantine.reason), tostring(state.quarantine.error)) end
     local inst = hk()
     if inst then local st = inst:status(now()); if st.unresolved > 0 then log("%d unresolved hold(s) on the instance; run  Plugin \"mtpnxk_surface\" \"recover\"", st.unresolved) end end
     for sid, s in pairs(state.sessions or {}) do

@@ -98,7 +98,12 @@ median / p95 / p99 / worst.
 4. A retransmitted refusal was acknowledged as success: the original acknowledgment is cached per
    event id and replayed.
 
-Harness: 101 checks (was 87); service: 19 tests; `e2e.sh` passes.
+5. (second pass) A `dispose()` that raises no longer loses ownership: the instance is quarantined with
+   its records, input is blocked at the next start, and `recover` exports and releases them before
+   re-enabling the requested input mode.
+
+Harness: 107 checks (was 87); service: 19 tests; `e2e.sh` passes. The shared module's preference change
+is pushed as GrandMA3MCP `2d226dd` (PR #12) and the vendored copy matches it byte for byte.
 
 ### Follow-ups filed
 

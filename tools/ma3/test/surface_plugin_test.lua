@@ -444,6 +444,35 @@ check("a service() error detaches the module but keeps its records", state.modul
 reset()
 check("those records are adopted at the next start too", state.modules.hardkeys.instance:status().unresolved == 1)
 state.running = true; Cleanup()
+-- A dispose() that raises must not lose the records either: the instance is quarantined, input blocked.
+reset()
+push({ t = "hello", v = 1, id = "nxk-q", gen = 1, nonce = "5555555555555555" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+Main(nil, "recover")
+check("recover with nothing to recover is quiet", findLog("recover: 0 released, 1 still unresolved") == nil)
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick(); drain()
+state.adapter:failNext("release", { pcKey = "S", shift = false, ctrl = false, alt = false, numlock = false }, "stuck", true)
+send({ t = "key", ev = 2, k = "Record", d = 0 }); tick(); drain()
+local qinst = state.modules.hardkeys.instance
+qinst.dispose = function() error("dispose exploded") end
+state.running = true; state.ignoreNextCleanup = false
+Cleanup()
+check("a raising dispose() quarantines the instance instead of dropping its records", state.quarantine and state.quarantine.instance == qinst and #(state.unresolved or {}) == 0 and findLog("quarantined with its ownership records"), lastLog())
+reset()
+check("the next start blocks input while the quarantine stands", state.inputEnabled == false and state.inputMode == "off" and state.quarantine ~= nil and findLog("input blocked"), lastLog())
+push({ t = "hello", v = 1, id = "nxk-q", gen = 2, nonce = "6666666666666666" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a new press is refused while blocked", ack and ack.ok == 0 and ack.code == "input-disabled", J(ack))
+qinst.dispose = nil  -- the fault is gone; the sticky release failure on the old backend stays
+state.running = true
+Main(nil, "recover")
+check("recover exports the quarantined records, adopts and releases them, and re-enables the requested input", state.quarantine == nil and state.inputEnabled == true and state.modules.hardkeys.instance:status().unresolved == 0 and findLog("quarantined instance exported 1 record") and findLog("recover: 1 released"), lastLog())
+send({ t = "key", ev = 2, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("the paired surface can press again after recovery", ack and ack.ok == 1 and eventCount("press") == 1, J(ack))
+state.running = true; state.ignoreNextCleanup = false; Cleanup()
 
 -------------------------------------------------------------------------------
 -- Allow list, stop and Cleanup

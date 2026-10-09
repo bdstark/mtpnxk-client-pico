@@ -212,7 +212,11 @@ every check reaches `hardkeys`/`feedback`.
   `Plugin "mtpnxk_surface" "recover"`, which re-attempts the releases through
   the current backend (attached for cleanup only when input is off) and
   reports what is still unresolved. Records the module rejects at adoption are
-  kept for the next start; `status` lists both.
+  kept for the next start; `status` lists both. If `dispose()` itself raises,
+  the instance is **quarantined** with its records instead of dropped, input
+  stays blocked at the next start, and `recover` first re-attempts the
+  releases on that instance, exports its records, adopts them and only then
+  re-enables the input mode requested at start.
 - **Restart.** After a plugin restart every session is gone (new `sid`, new
   plugin generation). After a service restart the hello carries a new
   surface `gen` and the keys physically down in `held`; the plugin opens a
