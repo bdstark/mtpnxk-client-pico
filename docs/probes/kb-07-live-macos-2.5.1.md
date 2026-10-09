@@ -37,11 +37,21 @@ p99 ≤ 80 ms is met at 10 taps/s except for single outliers. Ack round trip med
 measuring; they are revised in the protocol doc to median ≤ 60 ms, p99 ≤ 120 ms at
 10 taps/s, with the measured floor noted.
 
+## Hands-on with the NX-K (operator at the keypad, service `run`)
+
+Reported by the operator after the SipHash build: digits `1 2 3` registered on
+the command line; `Record` held lit its LED while `Store` was pending; `Clear`
+lit only while held; `HighLight` blinked while highlight mode was on and
+stopped after the second press; `Bank` held lit Bank and the four encoder
+LEDs. The Link LED was off while paired; it had not been seen blinking because
+the service pairs within a frame of starting and the keypad keeps its last
+LED state, so the unpaired/stale indication was tested separately by stopping
+the plugin (below).
+
 ## Not covered in this run
 
-LEDs on the physical NX-K under console state (the operator is reporting them
-separately), lost-connection cleanup and LED-freshness timings on the console,
-a flood at the console, Windows, a second display, non-US layouts.
+Lost-connection cleanup timing on the console (harness only), a flood at the
+console, Windows, a second display, non-US layouts.
 
 ## Cleanup
 
