@@ -52,6 +52,9 @@ enum Cmd {
         /// Seconds to run before exiting (0 = until the script ends, or forever with --repeat).
         #[arg(long, default_value_t = 0.0)]
         seconds: f64,
+        /// Exit without saying bye (simulates a pulled cable; the plugin's lease must clean up).
+        #[arg(long)]
+        abandon: bool,
     },
     /// Latency measurement: taps of '5' (and a Clear every 10) at a rate; reports percentiles.
     /// Start the plugin with `bench` to get press-to-effect timings as well.
@@ -94,6 +97,7 @@ struct Loop {
     verbose: bool,
     log_seen: usize,
     bank_held: bool,
+    bye_on_exit: bool,
 }
 
 impl Loop {
@@ -104,7 +108,7 @@ impl Loop {
         sock.set_nonblocking(true)?;
         let cfg = link::Config { id: surface_id(cli), ..link::Config::default() };
         let started = Instant::now();
-        Ok(Loop { link: link::Link::new(cfg, key, 0.0), leds: leds::Renderer::new(), sock, started, verbose: cli.verbose, log_seen: 0, bank_held: false })
+        Ok(Loop { link: link::Link::new(cfg, key, 0.0), leds: leds::Renderer::new(), sock, started, verbose: cli.verbose, log_seen: 0, bank_held: false, bye_on_exit: true })
     }
 
     fn now(&self) -> f64 {
@@ -179,9 +183,11 @@ impl Loop {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
-        self.link.bye();
-        for d in self.link.take_outgoing() {
-            let _ = self.sock.send(&d);
+        if self.bye_on_exit {
+            self.link.bye();
+            for d in self.link.take_outgoing() {
+                let _ = self.sock.send(&d);
+            }
         }
         Ok(())
     }
@@ -229,11 +235,12 @@ fn main() -> Result<()> {
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
-        Cmd::Sim { script, repeat, seconds } => {
+        Cmd::Sim { script, repeat, seconds, abandon } => {
             let steps = sim::parse_script(script)?;
             let mut keypad = sim::SimKeypad::new(steps, *repeat, true);
             let mut lp = Loop::new(&cli)?;
             let deadline = if *seconds > 0.0 { Some(Duration::from_secs_f64(*seconds)) } else { None };
+            lp.bye_on_exit = !abandon;
             lp.run(&mut keypad, |lp, s| {
                 let timed_out = deadline.map(|d| lp.started.elapsed() > d).unwrap_or(false);
                 // After the script ends, give acks a moment to arrive.

@@ -55,6 +55,13 @@ median / p95 / p99 / worst.
 
 ### Status
 
+- **Verified end to end without a console** (`sh tools/ma3/test/e2e.sh`): the real
+  plugin under stock Lua with a stubbed console, behind `udp_pipe_bridge.py` on a
+  real UDP port, driven by the real service. Pairing, acks, a retransmission
+  with zero losses, two refused local keys, an abandoned session released by
+  the lease, and a 100-tap bench (ack round trip median 9 ms, p99 26 ms
+  through a 16 ms relay frame; press-to-effect samples come from the stub's
+  synthetic command line and say nothing about the console yet).
 - Implemented and harness-tested, both sides. **Not yet run against onPC**:
   the plugin has not been imported into a console, the `Keyboard()` route and
   the readers are exercised only through the vendored modules' own live
