@@ -149,7 +149,14 @@ plays a key script and echoes the LED writes it would make.
 | --- | --- | --- |
 | `Load`, `Macro`, `Thru` | no keyboard shortcut maps to them in the default profile | add a shortcut for `LOAD`, `MACRO`, `THRU` in your user profile; the plugin resolves them at its next start. KB-09 (MCP repository) plans a guided way to do this |
 | `Fade`, `Delay`, `Snap Shot`, `Back` | not grandMA3 hardkeys (not in `Enums.VirtualKeyCode`) | nothing; they stay unsupported |
-| `Bank`, `Rotary1`–`Rotary4`, `Swap Prog`, `Link` | not console keys: Bank is the encoder modifier, rotaries are wheels (no verified Lua route for encoder input), Link is the link LED | encoders stay unsupported until a route is verified (separate work) |
+| `Bank`, `Swap Prog`, `Link` | not console keys: Bank is the rotaries' fine modifier (held), Link is the link LED | nothing; Bank only modifies the rotaries |
+
+The four rotaries are not keys: with the plugin started with `control=console` (KB-19) a detent on rotary n adjusts
+encoder slot n of the console's encoder bar for the current selection (`--rotary-slots 2` maps them to slots 2–5),
+one detent being one console encoder click, Bank held a tenth of a click; a push does nothing (not qualified) and is
+acknowledged `unsupported`. Without `control=console` (or with `control=fake`) nothing moves on the console; the
+plugin's `status` and the service's summary line say which backend is active and why an event was refused (no
+selection, the slot is unavailable for the selection, an unqualified readout or an editor context).
 
 The plugin never guesses a route: a key that does not resolve is reported at
 start and every event for it is acknowledged `unsupported`.

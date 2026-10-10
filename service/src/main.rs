@@ -36,6 +36,11 @@ struct Cli {
     /// Print every link event (pairing, refusals, losses).
     #[arg(long, global = true)]
     verbose: bool,
+    /// KB-19: the first encoder slot the four rotaries mean (1 = slots 1-4, the console's default page
+    /// layout; 2 = slots 2-5 reaches a fifth pool slot). An explicit window, never a silent discard; a slot
+    /// the bound page does not have is refused by the plugin with the reason.
+    #[arg(long, default_value_t = 1, global = true, value_parser = clap::value_parser!(u8).range(1..=5))]
+    rotary_slots: u8,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -118,6 +123,8 @@ struct Loop {
     log_seen: usize,
     bank_held: bool,
     bye_on_exit: bool,
+    /// KB-19: the first encoder slot of the rotaries (`--rotary-slots`).
+    rotary_base: u8,
 }
 
 impl Loop {
@@ -128,7 +135,10 @@ impl Loop {
         sock.set_nonblocking(true)?;
         let cfg = link::Config { id: surface_id(cli), ..link::Config::default() };
         let started = Instant::now();
-        Ok(Loop { link: link::Link::new(cfg, key, 0.0), leds: leds::Renderer::new(), sock, started, verbose: cli.verbose, log_seen: 0, bank_held: false, bye_on_exit: true })
+        if cli.rotary_slots != 1 {
+            eprintln!("rotaries: explicit slot window {}-{} (--rotary-slots {})", cli.rotary_slots, cli.rotary_slots + 3, cli.rotary_slots);
+        }
+        Ok(Loop { link: link::Link::new(cfg, key, 0.0), leds: leds::Renderer::new(), sock, started, verbose: cli.verbose, log_seen: 0, bank_held: false, bye_on_exit: true, rotary_base: cli.rotary_slots })
     }
 
     fn now(&self) -> f64 {
@@ -153,12 +163,14 @@ impl Loop {
                     }
                     self.link.key_event(name, false, now);
                 }
-                // KB-18: the four rotaries are the four encoder slots of the bound display; Bank held is
-                // the explicit fine modifier (KB-19 decides what it means on the console); a push is a
-                // button boundary. Everything travels as `ctl` events through the link's admission.
-                Event::Rotate { wheel, delta, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel), link::CtlKind::Rel { dx: delta, fine: self.bank_held }, now),
-                Event::PressDown { wheel, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel), link::CtlKind::Btn { down: true }, now),
-                Event::PressUp { wheel, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel), link::CtlKind::Btn { down: false }, now),
+                // KB-18: the four rotaries are four encoder slots of the bound display (slots
+                // `--rotary-slots`..+3, 1-4 by default); Bank held is the explicit fine modifier (KB-19: a
+                // tenth of a click on the console); a push is a button boundary (refused by the console
+                // backend: not qualified). Everything travels as `ctl` events through the link's admission.
+                // No acceleration is applied anywhere in the service: the device's delta is the detent count.
+                Event::Rotate { wheel, delta, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel, self.rotary_base), link::CtlKind::Rel { dx: delta, fine: self.bank_held }, now),
+                Event::PressDown { wheel, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel, self.rotary_base), link::CtlKind::Btn { down: true }, now),
+                Event::PressUp { wheel, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel, self.rotary_base), link::CtlKind::Btn { down: false }, now),
                 Event::Unknown { bytes } => {
                     if self.verbose {
                         eprintln!("nxk: unknown packet {bytes:02x?}");
@@ -219,8 +231,23 @@ impl Loop {
 
 const ROTARIES: [&str; 4] = ["Rotary1", "Rotary2", "Rotary3", "Rotary4"];
 
-fn link_target(wheel: u8) -> protocol::CtlTarget {
-    protocol::CtlTarget::Slot { slot: wheel.clamp(1, 4) }
+/// Rotary `wheel` (1-4) means encoder slot `base + wheel - 1` of the bound display (KB-19 `--rotary-slots`).
+fn link_target(wheel: u8, base: u8) -> protocol::CtlTarget {
+    protocol::CtlTarget::Slot { slot: base.clamp(1, 5) + wheel.clamp(1, 4) - 1 }
+}
+
+#[cfg(test)]
+mod rotary_tests {
+    use super::*;
+    #[test]
+    fn rotaries_map_to_a_slot_window() {
+        assert_eq!(link_target(1, 1), protocol::CtlTarget::Slot { slot: 1 });
+        assert_eq!(link_target(4, 1), protocol::CtlTarget::Slot { slot: 4 });
+        assert_eq!(link_target(1, 2), protocol::CtlTarget::Slot { slot: 2 });
+        assert_eq!(link_target(4, 2), protocol::CtlTarget::Slot { slot: 5 });
+        assert_eq!(link_target(9, 1), protocol::CtlTarget::Slot { slot: 4 }, "an out-of-range wheel clamps");
+        assert_eq!(link_target(4, 9), protocol::CtlTarget::Slot { slot: 8 }, "the base is bounded so the slot stays within the plugin's 1..8");
+    }
 }
 
 fn percentiles(label: &str, samples: &[f64]) {
@@ -338,8 +365,8 @@ fn print_summary(link: &link::Link) {
         st.dropped_unpaired
     );
     println!(
-        "control: events={} sent={} coalesced={} unbound={} aged={} stale={} unsupported={} refused={} lost_reported={} superseded={} overflow={} queued={}",
-        st.ctl_events, st.ctl_sent, st.ctl_coalesced, st.ctl_unbound, st.ctl_aged, st.ctl_stale, st.ctl_unsupported, st.ctl_refused, st.ctl_lost_reported, st.ctl_superseded, st.ctl_overflow, link.queued_motion()
+        "control: events={} sent={} coalesced={} unbound={} aged={} stale={} unsupported={} refused={} lost_reported={} superseded={} overflow={} queued={} max_detent={}",
+        st.ctl_events, st.ctl_sent, st.ctl_coalesced, st.ctl_unbound, st.ctl_aged, st.ctl_stale, st.ctl_unsupported, st.ctl_refused, st.ctl_lost_reported, st.ctl_superseded, st.ctl_overflow, link.queued_motion(), st.ctl_max_detent
     );
     if let Some(s) = link.session() {
         println!("session: sid={} plugin gen={} input={:?} control={} keys ok={} unsupported={:?}", s.sid, s.plugin_gen, s.input, if s.control { s.control_backend.clone().unwrap_or_else(|| "on".into()) } else { "off".into() }, s.keys.ok.len(), s.keys.unsupported);

@@ -96,6 +96,9 @@ pub struct Stats {
     pub ctl_superseded: u64,
     /// Positions dropped because a control's motion queue overflowed (stateful targets keep every position).
     pub ctl_overflow: u64,
+    /// KB-19: the largest |delta| of one rotary event seen (a device that accelerates reports more than one
+    /// detent per report; the service adds nothing to it, so this is what reaches the console per event).
+    pub ctl_max_detent: i32,
 }
 
 /// Fader functions whose value path matters (the same set as the console module's STATEFUL_FUNCTIONS):
@@ -457,6 +460,7 @@ impl Link {
                 if dx == 0 {
                     return;
                 }
+                self.stats.ctl_max_detent = self.stats.ctl_max_detent.max(dx.abs());
                 let Some(cg) = cg else {
                     self.stats.ctl_unbound += 1;
                     return;
@@ -1262,6 +1266,7 @@ mod tests {
         assert_eq!(c.len(), 2, "{out:?}");
         assert_eq!(c[0]["k"], "rel"); assert_eq!(c[0]["dev"], "nxk"); assert_eq!(c[0]["c"], "Rotary1"); assert_eq!(c[0]["dx"], 1); assert_eq!(c[0]["cg"], 3); assert_eq!(c[0]["es"], 1); assert_eq!(c[0]["tgt"]["slot"], 1); assert!(c[0]["fine"].is_null());
         assert_eq!(c[1]["c"], "Rotary2"); assert_eq!(c[1]["dx"], 5); assert_eq!(c[1]["fine"], 1); assert_eq!(c[1]["es"], 2, "one sequence per device");
+        assert_eq!(link.stats.ctl_max_detent, 5, "KB-19: the largest single-event delta is recorded, never amplified");
         assert_ne!(c[0]["gs"], c[1]["gs"], "each control has its own gesture");
         assert_eq!(link.stats.ctl_sent, 2);
         // Motion is never retransmitted.

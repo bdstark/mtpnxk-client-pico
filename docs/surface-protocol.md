@@ -275,8 +275,8 @@ plugin  → service  ack { t:"ack", sid, seq, ev, ok, code?, why?, cg?, lost?, c
 | `es` | the service's event sequence per device, one per packet sent (a merged burst is one); the plugin refuses a repeated one (`duplicate`) and an older unseen one (`out-of-order`, never applied late) and accepts a gap as packet loss, reported back as `lost` |
 | `cg` | the binding generation the event was produced against: the `cg` of the last known `context` message. Required for motion and downs; absent on a release. The plugin refuses a stale one (`stale-generation`, the current `cg` in the ack) and anything while it claims no generation (`binding-unknown`) |
 | `gs` | the gesture id: new on every touch down and button, and for untouched rotaries after 300 ms idle. The plugin coalesces deltas only within one gesture |
-| `tgt` | `{slot: n}` (encoder slot n of the bound display) or `{ex: n, el: fader\|key\|encoder}` (an element of a bound executor); the NX-K rotaries 1–4 are slots 1–4 |
-| `fine` | the surface's explicit fine modifier (Bank held on the NX-K); what it means on the console is KB-19's |
+| `tgt` | `{slot: n}` (encoder slot n of the bound display) or `{ex: n, el: fader\|key\|encoder}` (an element of a bound executor); the NX-K rotaries 1–4 are slots `--rotary-slots`..+3 (1–4 by default; `2` reaches slot 5, KB-19) |
+| `fine` | the surface's explicit fine modifier (Bank held on the NX-K); on the console backend it divides the calibrated click by 10 (KB-19) |
 
 The service (`src/link.rs`) queues motion and merges it before sending: deltas of one control, generation and
 gesture add up; a newer position replaces the queued one only for an encoder slot or an executor whose fader
@@ -297,8 +297,13 @@ absolute supersession rule (stateless functions only), its late-release rule (a 
 press still ends its hold), its binding revision (required by default; this plugin's spec is fixed for its run and declares so, so `ctl` events carry none) and
 the busy descriptor are the MCP repository's
 (`docs/modules.md` there, "Continuous-control admission"). Its `service()` runs after the hardkeys and feedback
-services every tick and applies at most 4 intents through the backend; KB-18 ships the **fake backend only**
-(`control=fake`: intents recorded, nothing moves on the console). A session's lease lapse, `bye`, silence or the
+services every tick and applies at most 4 intents through the backend: `control=fake` (intents recorded, nothing moves
+on the console) or, since KB-19 (plugin 0.5.0, control 0.2.0), `control=console`, the vendored **console adjustment
+backend**: a relative event on an attribute slot becomes `Attribute "<name>" At +/- <detents x step>` for the selection,
+one detent being one console encoder click (Percent/PercentFine readouts 1 at Coarse, Physical readouts the attribute's
+range / 120 in physical units from the context's `physicalRange`, Fine a tenth, `fine` a tenth again); pushes, touches,
+positions and executor elements are acknowledged `unsupported` at admission (`docs/modules.md` there, "Console
+adjustment backend"). A session's lease lapse, `bye`, silence or the
 plugin's stop ends its gestures through the backend and drops queued motion; a release the backend raised on is
 kept across restarts for `Plugin "mtpnxk_surface" "recover"`. The plugin's and the bridge's control instances do not
 arbitrate with each other (section 6 applies).

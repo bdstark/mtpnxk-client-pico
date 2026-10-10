@@ -58,7 +58,16 @@ local my_handle     = select(4, ...)
 local socket = require("socket")
 local json   = require("json")
 
-local VERSION   = "0.4.0"
+-- KB-19 (0.5.0): `control=console` attaches the vendored module's console adjustment backend: a rotary
+-- detent on slot n becomes the selection-scoped  Attribute "<name>" At +/- <detents x step>  for whatever
+-- attribute the bound display's slot n holds (name, layer, resolution, readout, channel function and
+-- physical range from this plugin's own context snapshot). One detent is one console encoder click
+-- (Percent readout 1, Physical readout range/120 in physical units, Fine a tenth); Bank held (`fine`)
+-- is a tenth of that. Rotary pushes, strip touches/positions and executor elements are refused
+-- `unsupported` by that backend at admission (nothing pressed; KB-20/21/22). The console semantics are
+-- the MCP repository's (docs/modules.md there, "Console adjustment backend"); this plugin only chooses
+-- the backend.
+local VERSION   = "0.5.0"
 local PROTOCOL  = 1
 local MAGIC     = "MTX1"
 local DEFAULTS = {
@@ -278,7 +287,7 @@ local function parseArgument(argument)
         end
       elseif k == "control" then
         local m = v:lower()
-        if m ~= "fake" and m ~= "off" then return nil, "control must be fake or off (KB-18 ships the fake backend only)" end
+        if m ~= "fake" and m ~= "console" and m ~= "off" then return nil, "control must be fake, console or off" end
         opts.control = m
       elseif k == "display" then opts.display = tonumber(v); if not opts.display then return nil, "display must be a number" end
       elseif k == "execs" then opts.execs = {}; for n in v:gmatch("[^,]+") do opts.execs[#opts.execs + 1] = tonumber(n) end
@@ -1406,7 +1415,14 @@ enableControl = function(mode)
     return true
   end
   if not rec or not rec.instance then logerr("control %s requested but the control module is not loaded (%s)", mode, tostring(rec and rec.error)); state.controlMode = "off"; return false end
-  local ok, err = pcall(function() rec.instance:enableInput(rec.module.fakeBackend()) end)
+  local ok, err = pcall(function()
+    if mode == "console" then
+      if type(rec.module.consoleBackend) ~= "function" then error("the vendored control module " .. tostring(rec.version) .. " has no console backend (0.2.0 or newer is needed)", 0) end
+      rec.instance:enableInput(rec.module.consoleBackend(rec.module.consoleDeps(_G)))
+    else
+      rec.instance:enableInput(rec.module.fakeBackend())
+    end
+  end)
   if not ok then logerr("control %s: enableInput failed: %s", mode, tostring(err)); state.controlMode = "off"; return false end
   local kept = state.controlUnresolved or {}
   if #kept > 0 then
@@ -1415,7 +1431,11 @@ enableControl = function(mode)
     log("control: adopted %d unresolved release(s) from a previous run (recover re-attempts them)", a.adopted)
   end
   state.controlEnabled = true
-  log("control enabled on the %s backend (intents recorded; nothing moves on the console until KB-19)", mode)
+  if mode == "console" then
+    log("control enabled on the console backend: a rotary detent on slot n is applied as Attribute \"<name>\" At +/- <detents x step> for the selection (KB-19); pushes are refused unsupported")
+  else
+    log("control enabled on the fake backend (intents recorded; nothing moves on the console)")
+  end
   return true
 end
 
@@ -1578,13 +1598,16 @@ local function MainImpl(display_handle, argument)
     recoverUnresolved()
     local c = ctl()
     if c then
-      if not c:backendAvailable() then c:attachBackend(state.modules.control.module.fakeBackend()) end
+      if not c:backendAvailable() then
+        local m = state.modules.control.module
+        c:attachBackend((state.controlMode == "console" and type(m.consoleBackend) == "function") and m.consoleBackend(m.consoleDeps(_G)) or m.fakeBackend())
+      end
       local kept = state.controlUnresolved or {}
       if #kept > 0 then local a = c:adopt(kept, now()); state.controlUnresolved = {}; log("control recover: adopted %d record(s) from a previous run", a.adopted) end
       local r = c:recover(now())
       log("control recover: %d resolved, %d still unresolved", #r.resolved, #r.unresolved)
       for _, u in ipairs(r.unresolved) do logerr("control recover: still UNRESOLVED %s release on %s/%s: %s", tostring(u.kind), tostring(u.device), tostring(u.control), tostring(u.error)) end
-    elseif state.controlUnresolved and #state.controlUnresolved > 0 then log("control recover: not running; %d record(s) kept for the next start with control=fake", #state.controlUnresolved) end
+    elseif state.controlUnresolved and #state.controlUnresolved > 0 then log("control recover: not running; %d record(s) kept for the next start with control=fake|console", #state.controlUnresolved) end
     return
   end
   if opts.command and opts.command:match("^bank%-") then

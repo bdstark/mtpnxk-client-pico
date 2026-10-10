@@ -170,7 +170,7 @@ check("bad option refused", select(2, state._parseArgument("key=x bogus")) ~= ni
 check("start without a key is refused", reset("input=fake") == false and findLog("pairing key is required"))
 check("start with a short key is refused", reset("key=abcd input=fake") == false)
 check("start with a key succeeds on the fake backend", reset() == true and state.inputEnabled == true and state.inputMode == "fake" and state.gen:match("^%d+%-%x%x%x%x%x%x%x%x$"), J({ state.inputMode, state.gen }))
-check("modules loaded (vendored versions)", state.modules.hardkeys.version == "0.10.0" and state.modules.feedback.version == "0.3.0", J(state.moduleVersions))
+check("modules loaded (vendored versions)", state.modules.hardkeys.version == "0.10.0" and state.modules.feedback.version == "0.4.0", J(state.moduleVersions))
 check("feedback watch list bounded (9 state items + 3 more context items for the NX-K; page is shared)", state.modules.feedback.instance:status().watched == 12)
 
 -------------------------------------------------------------------------------
@@ -488,28 +488,34 @@ do
     send({ t = "ctl", ev = 1, k = "rel", dev = "nxk", c = "Rotary1", es = 1, cg = 1, tgt = { slot = 1 }, dx = 1 }); tick()
     local a = ofType(drain(), "ack")[1]
     return a and a.ok == 0 and a.code == "control-disabled" end)())
-  check("control=bogus is refused", select(2, state._parseArgument("key=" .. KEYHEX .. " control=console")) ~= nil)
+  check("control=bogus is refused", select(2, state._parseArgument("key=" .. KEYHEX .. " control=bogus")) ~= nil)
   reset("key=" .. KEYHEX .. " input=fake control=fake")
-  check("control=fake enables the module on its fake backend", state.controlEnabled == true and state.controlMode == "fake" and state.modules.control.version == "0.1.0" and findLog("control enabled on the fake backend"), lastLog())
+  check("control=fake enables the module on its fake backend", state.controlEnabled == true and state.controlMode == "fake" and state.modules.control.version == "0.2.0" and findLog("control enabled on the fake backend"), lastLog())
   push({ t = "hello", v = 1, id = "nxk-c1", gen = 7, nonce = "c1c1c1c1c1c1c1c1", surface = "nxk", fw = "0.1.0" }); tick()
   local w = ofType(drain(), "welcome")[1]
   check("the welcome announces control 1 on the fake backend and the control session is open", w and w.control == 1 and w.controlBackend == "fake" and state.sessions[w.sid].controlOpen == true, J(w))
   sid, seq = w.sid, 0
   -- The stub console has no encoder bar: slots are unavailable. Stage a binding with slots and executors
   -- through the feedback instance (the context message and the module see the same snapshot).
-  local inst = state.modules.feedback.instance
-  local real = inst.contextSnapshot
   local gen = 5
-  inst.contextSnapshot = function(self, spec, t, opts)
-    local snap = real(self, spec, t, opts)
-    snap.generation, snap.generationUnknown, snap.generationNote, snap.stale, snap.notObserved = gen, nil, nil, nil, 0
-    snap.slots = { available = true, value = { bank = { index = 1, name = "Dimmer" }, page = { index = 1, name = "Dimmer" }, context = "Default", selection = { count = 1, fixtures = { 401 }, identityComplete = true }, slots = {
-      { slot = 1, kind = "attribute", ref = "Attribute 1 'Dimmer'", name = "Dimmer", layer = "Absolute", resolution = "Coarse", readout = "Percent", channelFunction = "Dimmer", availability = "available" },
-      { slot = 2, kind = "empty" } } } }
-    snap.executors = { { available = true, value = { executor = 201, page = 3, empty = false, playbackTarget = true, assigned = { addr = "Sequence 1" }, functions = { keyPress = "Go+", fader = "Master" }, level = { token = "FaderMaster", value = 0 } } } }
-    return snap
+  local inst, real
+  local function stageBinding()
+    inst = state.modules.feedback.instance
+    real = inst.contextSnapshot
+    inst.contextSnapshot = function(self, spec, t, opts)
+      local snap = real(self, spec, t, opts)
+      snap.generation, snap.generationUnknown, snap.generationNote, snap.stale, snap.notObserved = gen, nil, nil, nil, 0
+      snap.encoder = { available = true, value = { display = 1, bank = { index = 1, name = "Dimmer", pages = 1 }, page = { index = 1, name = "Dimmer", slots = 2 }, context = "Default", attributeEditing = true } }
+      snap.slots = { available = true, value = { bank = { index = 1, name = "Dimmer" }, page = { index = 1, name = "Dimmer" }, context = "Default", selection = { count = 1, fixtures = { 401 }, identityComplete = true }, slots = {
+        { slot = 1, kind = "attribute", ref = "Attribute 1 'Dimmer'", name = "Dimmer", layer = "Absolute", resolution = "Coarse", readout = "Percent", channelFunction = "Dimmer", availability = "available", physicalRange = 1 },
+        { slot = 2, kind = "attribute", ref = "Attribute 2 'Pan'", name = "Pan", layer = "Absolute", resolution = "Coarse", readout = "Physical", channelFunction = "", availability = "available", physicalRange = 450, physicalFrom = -225, physicalTo = 225 },
+        { slot = 3, kind = "empty" } } } }
+      snap.executors = { { available = true, value = { executor = 201, page = 3, empty = false, playbackTarget = true, assigned = { addr = "Sequence 1" }, functions = { keyPress = "Go+", fader = "Master" }, level = { token = "FaderMaster", value = 0 } } } }
+      return snap
+    end
+    for _ = 1, 4 do tickAlive(0.05); drain() end
   end
-  for _ = 1, 4 do tickAlive(0.05); drain() end
+  stageBinding()
   local function ctl(ev, k, extra)
     local o = { t = "ctl", ev = ev, k = k, dev = "nxk", c = "Rotary1", es = extra.es, cg = extra.cg or gen, gs = extra.gs or 1, tgt = extra.tgt or { slot = 1 } }
     for key, v in pairs(extra) do if key ~= "es" and key ~= "cg" and key ~= "gs" and key ~= "tgt" then o[key] = v end end
@@ -595,6 +601,37 @@ do
   send({ t = "bye" }); tick()
   check("bye ends the session's gestures through the backend", fake.intents[#fake.intents].kind == "button" and fake.intents[#fake.intents].reason == "bye" and findLog("button on nxk/Rotary1 ended %(applied%)"), lastLog())
   inst.contextSnapshot = real
+  -- KB-19: control=console applies rotary detents through the vendored console backend (Cmd recorded by the stub).
+  reset("key=" .. KEYHEX .. " input=fake control=console")
+  check("kb19: control=console enables the vendored console backend", state.controlEnabled == true and state.controlMode == "console" and findLog("control enabled on the console backend"), lastLog())
+  push({ t = "hello", v = 1, id = "nxk-c5", gen = 11, nonce = "c5c5c5c5c5c5c5c5", surface = "nxk", fw = "0.1.0" }); tick()
+  w = ofType(drain(), "welcome")[1]
+  check("kb19: the welcome announces control 1 on the console backend", w and w.control == 1 and w.controlBackend == "console", J(w))
+  sid, seq = w.sid, 0
+  stageBinding()
+  local cmdsBefore = #pool.cmds
+  -- The ack says queued; the loop's next tick applies the intent through the backend (the stub records the Cmd).
+  send(ctl(40, "rel", { es = 1, dx = 2 })); tick()
+  a = ackOf(); tick()
+  check("kb19: two detents on slot 1 are admitted and applied by the next tick as Attribute \"Dimmer\" At + 2 (one Coarse click = 1 at Percent)", a and a.ok == 1 and a.queued == 1 and lastCmd('^Attribute "Dimmer" At %+ 2$') ~= nil and #pool.cmds == cmdsBefore + 1, J({ a, pool.cmds[#pool.cmds] }))
+  send(ctl(41, "rel", { es = 2, dx = -3, fine = 1, gs = 2 })); tick(); tick()
+  check("kb19: three fine detents (Bank held) are At - 0.3", lastCmd('^Attribute "Dimmer" At %- 0%.3$') ~= nil, pool.cmds[#pool.cmds])
+  send(ctl(42, "rel", { es = 3, dx = 4, c = "Rotary2", tgt = { slot = 2 }, gs = 3 })); tick(); tick()
+  check("kb19: four detents on a Physical-readout slot are range / 120 each in physical units (Pan 450: At + 15)", lastCmd('^Attribute "Pan" At %+ 15$') ~= nil and #pool.cmds == cmdsBefore + 3, pool.cmds[#pool.cmds])
+  send(ctl(43, "btn", { es = 4, d = 1 })); tick()
+  a = ackOf()
+  check("kb19: a rotary push is refused unsupported on the console backend (nothing pressed, no gesture owned)", a and a.ok == 0 and a.code == "unsupported" and state.modules.control.instance:admission(clock.t + 1) == nil, J(a))
+  send(ctl(44, "abs", { es = 5, v = 0.5, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 4 })); tick()
+  a = ackOf()
+  check("kb19: a strip position is refused unsupported on the console backend (KB-20/22)", a and a.ok == 0 and a.code == "unsupported", J(a))
+  Main(nil, "status"); Cleanup()
+  check("kb19: status names the console backend", findLog("control: enabled backend=console") ~= nil, lastLog())
+  pool.cmds = {}  -- the later input=mixed checks expect no recorded console command
+  reset("key=" .. KEYHEX .. " input=fake control=fake")
+  push({ t = "hello", v = 1, id = "nxk-c6", gen = 12, nonce = "c6c6c6c6c6c6c6c6", surface = "nxk", fw = "0.1.0" }); tick()
+  w = ofType(drain(), "welcome")[1]
+  sid, seq = w.sid, 0
+  stageBinding()
   -- An unresolved release (the backend raised) survives a cleanup and is adopted by the next control=fake start.
   push({ t = "hello", v = 1, id = "nxk-c3", gen = 9, nonce = "c3c3c3c3c3c3c3c3", surface = "nxk", fw = "0.1.0" }); tick()
   local w3 = ofType(drain(), "welcome")[1]
