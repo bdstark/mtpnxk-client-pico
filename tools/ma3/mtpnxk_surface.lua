@@ -1203,7 +1203,9 @@ local function loadModules()
             local ok, busy = pcall(h.admission, h, t)
             return ok and busy or nil
           end
-          return mod.new({ owner = pluginName, deps = deps, config = { defaultLeaseMs = DEFAULTS.leaseMs, maxWorkPerService = DEFAULTS.controlWorkPerTick } }):init()
+          -- This plugin's binding (display= and execs=) is fixed for its run, so events carry no binding
+          -- revision; the exemption is declared here, explicitly (the module requires the revision by default).
+          return mod.new({ owner = pluginName, deps = deps, config = { defaultLeaseMs = DEFAULTS.leaseMs, maxWorkPerService = DEFAULTS.controlWorkPerTick, requireBindingRevision = false } }):init()
         end
         return mod.new({ owner = pluginName, deps = deps, config = { maxReadsPerService = DEFAULTS.readsPerService } }):init()
       end)

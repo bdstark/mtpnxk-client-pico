@@ -294,7 +294,7 @@ The plugin maps the packet onto the vendored `gma3_mcp_control` module's event a
 module's admission (session lease, order, rate, binding, target, ownership, bounds), its coalescing (within one
 session, device, control, target, generation, resolution, fine flag and gesture, never across a boundary), its
 absolute supersession rule (stateless functions only), its late-release rule (a delayed release newer than its own
-press still ends its hold), its binding revision (`stale-binding` when the plugin's spec changed; fixed here) and
+press still ends its hold), its binding revision (required by default; this plugin's spec is fixed for its run and declares so, so `ctl` events carry none) and
 the busy descriptor are the MCP repository's
 (`docs/modules.md` there, "Continuous-control admission"). Its `service()` runs after the hardkeys and feedback
 services every tick and applies at most 4 intents through the backend; KB-18 ships the **fake backend only**
