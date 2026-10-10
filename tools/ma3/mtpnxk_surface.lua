@@ -54,7 +54,7 @@ local my_handle     = select(4, ...)
 local socket = require("socket")
 local json   = require("json")
 
-local VERSION   = "0.2.0"
+local VERSION   = "0.2.1"
 local PROTOCOL  = 1
 local MAGIC     = "MTX1"
 local DEFAULTS = {
@@ -779,6 +779,19 @@ end
 -- Takes the hardkeys instance out of service without losing what it owns: input off, a release attempt
 -- for every held key, and every record that stays unresolved kept in state.unresolved for adoption by
 -- the next start and for the "recover" command. Used on a service() error, at stop and in Cleanup.
+-- KB-14: a temporary shortcut-mode change dispose() could not restore (a dependent key still held, the
+-- restore delay not elapsed, or the profile/mode changed meanwhile) comes back as a restoration record.
+-- It is kept like an unresolved key record: adopted at the next start as an unresolved restoration (every
+-- new press refused until it is restored) and restored by "recover" on the original profile. Dropping it
+-- would leave the operator's shortcuts changed with nothing that remembers the original state.
+local function keepModeRecord(mode, now, reason)
+  if type(mode) ~= "table" then return end
+  mode.keptAt, mode.keptReason = now, reason
+  state.modeRecord = mode
+  logerr("%s: keeping the unresolved keyboard-shortcut mode restoration %s (profile '%s', shortcuts %s -> %s): %s; it is adopted at the next start and restored by  Plugin \"mtpnxk_surface\" \"recover\"  on that profile",
+    reason, tostring(mode.id), tostring(mode.profile), tostring(mode.original), tostring(mode.target), tostring(mode.unresolved and mode.unresolved.reason))
+end
+
 local function detachHardkeys(reason, now)
   local rec = state.modules.hardkeys
   local inst = rec and rec.instance
@@ -806,6 +819,7 @@ local function detachHardkeys(reason, now)
       state.bankRecord = r.bank
       log("bank record %s kept for the next start (%d code(s)); nothing on the console was changed", tostring(r.bank.id), #(r.bank.codes or {}))
     end
+    keepModeRecord(r.mode, now, reason)
   else
     -- dispose() raised (or returned nothing): the instance still owns its records, so it is kept in
     -- quarantine instead of being dropped. New input stays blocked until "recover" exports them.
@@ -834,7 +848,8 @@ local function exportQuarantine(t)
     state.unresolved[#state.unresolved + 1] = record
   end
   if type(r.bank) == "table" then state.bankRecord = r.bank end
-  log("quarantined instance exported %d record(s)", #(r.records or {}))
+  keepModeRecord(r.mode, t, "quarantine")
+  log("quarantined instance exported %d record(s)%s", #(r.records or {}), type(r.mode) == "table" and " and a mode restoration record" or "")
   state.quarantine = nil
   return true
 end
@@ -954,6 +969,22 @@ local function adoptKept(t)
   for _, a in ipairs(r.adopted or {}) do log("adopted unresolved record %s(%s): its key stays reserved until \"recover\" releases it", tostring(a.logical or "raw"), tostring(a.tupleKey)) end
 end
 
+-- KB-14: the kept restoration record becomes an unresolved restoration of the new instance (owner
+-- "previous-run"); nothing is written until "recover" re-reads the profile and the mode.
+local function adoptKeptMode(t)
+  local record = state.modeRecord
+  if type(record) ~= "table" then return end
+  local inst = hk()
+  if not inst then return end
+  if type(inst.adoptMode) ~= "function" then logerr("a keyboard-shortcut mode restoration record is kept but the loaded module has no adoptMode(); it is kept"); return end
+  local ok, r, err = pcall(inst.adoptMode, inst, record, t)
+  if not ok then logerr("adopting the kept mode restoration raised: %s; the record is kept", tostring(r)); return end
+  if not r then logerr("kept mode restoration not adopted [%s]: %s; the record is dropped", tostring(err and err.code), tostring(err and err.message)); state.modeRecord = nil; return end
+  state.modeRecord = nil
+  logerr("adopted the unresolved keyboard-shortcut mode restoration %s from a previous run (profile '%s', shortcuts %s -> %s); every new press is refused until  Plugin \"mtpnxk_surface\" \"recover\"  restores it on that profile",
+    tostring(r.id), tostring(r.profile), tostring(r.original), tostring(r.target))
+end
+
 local enableInput  -- defined below; recover re-enables the requested input after a quarantine clears
 
 -------------------------------------------------------------------------------
@@ -1053,6 +1084,7 @@ local function recoverUnresolved()
   local wasBlocked = state.quarantine ~= nil
   if not exportQuarantine(t) then return end
   adoptKept(t)
+  adoptKeptMode(t)
   if wasBlocked and state.inputRequested and state.inputRequested ~= "off" and not state.inputEnabled then
     log("recover: quarantine cleared; enabling the input mode requested at start (%s)", state.inputRequested)
     enableInput(state.inputRequested, state.forceRequested)
@@ -1085,6 +1117,12 @@ local function recoverUnresolved()
     log("recover: %s backend attached for cleanup only (input stays %s)", wanted, tostring(state.inputMode))
   end
   local r = inst:recover(nil, t)
+  if type(r.restoration) == "table" then
+    local m = r.restoration
+    if m.state == "restored" then log("recover: keyboard-shortcut mode restoration %s restored (profile '%s', shortcuts back to %s, by %s%s)", tostring(m.id), tostring(m.profile), tostring(m.original), tostring(m.restoredBy), m.restoreNote and ("; " .. m.restoreNote) or "")
+    elseif m.state == "active" then log("recover: keyboard-shortcut mode restoration %s re-validated; the loop restores it %d ms after the last key event", tostring(m.id), tonumber(m.restoreInMs) or 0)
+    else logerr("recover: keyboard-shortcut mode restoration %s still unresolved: %s", tostring(m.id), tostring(m.unresolved and m.unresolved.reason)) end
+  end
   for _, a in ipairs(r.released or {}) do log("recover: released %s(%s) of session %s", tostring(a.logical or "raw"), tostring(a.tupleKey), tostring(a.session)) end
   for _, a in ipairs(r.unresolved or {}) do logerr("recover: %s(%s) still UNRESOLVED: %s", tostring(a.logical or "raw"), tostring(a.tupleKey), tostring(a.error)) end
   log("recover: %d released, %d still unresolved, %d record(s) not adopted", #(r.released or {}), #(r.unresolved or {}), #(state.unresolved or {}))
@@ -1223,6 +1261,7 @@ local function start(opts)
   local t = now()
   if exportQuarantine(t) then
     adoptKept(t)
+    adoptKeptMode(t)
     adoptKeptBank(t)
     provisionBank(opts, t)
     enableInput(opts.input, opts.force)
@@ -1282,9 +1321,18 @@ local function MainImpl(display_handle, argument)
       end
     elseif state.bankRecord then log("bank record %s kept (not running)", tostring(state.bankRecord.id)) end
     if state.unresolved and #state.unresolved > 0 then log("%d unresolved record(s) kept from a previous run (not adopted yet)", #state.unresolved) end
+    if type(state.modeRecord) == "table" then logerr("a keyboard-shortcut mode restoration record is kept from a previous run (profile '%s', shortcuts %s -> %s; not adopted yet): run  Plugin \"mtpnxk_surface\" \"recover\"", tostring(state.modeRecord.profile), tostring(state.modeRecord.original), tostring(state.modeRecord.target)) end
     if state.quarantine then logerr("a previous instance is quarantined (%s: %s); input is blocked until  recover  exports its records", tostring(state.quarantine.reason), tostring(state.quarantine.error)) end
     local inst = hk()
-    if inst then local st = inst:status(now()); if st.unresolved > 0 then log("%d unresolved hold(s) on the instance; run  Plugin \"mtpnxk_surface\" \"recover\"", st.unresolved) end end
+    if inst then
+      local st = inst:status(now())
+      if st.unresolved > 0 then log("%d unresolved hold(s) on the instance; run  Plugin \"mtpnxk_surface\" \"recover\"", st.unresolved) end
+      if type(st.modeChange) == "table" then
+        local m = st.modeChange
+        if m.state == "unresolved" then logerr("keyboard-shortcut mode restoration %s UNRESOLVED (profile '%s', shortcuts %s -> %s): %s; run  Plugin \"mtpnxk_surface\" \"recover\"", tostring(m.id), tostring(m.profile), tostring(m.original), tostring(m.target), tostring(m.unresolved and m.unresolved.reason))
+        else log("keyboard-shortcut mode change %s %s (profile '%s', shortcuts %s -> %s)", tostring(m.id), tostring(m.state), tostring(m.profile), tostring(m.original), tostring(m.target)) end
+      end
+    end
     for sid, s in pairs(state.sessions or {}) do
       local held = {}
       for name in pairs(s.holds) do held[#held + 1] = name end

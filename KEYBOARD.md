@@ -197,6 +197,12 @@ and adds the surface side in `mtpnxk_surface.lua` 0.2.0:
   mixed), as the bridge does.
 - A stale run left by `ReloadAllPlugins` (state marked running, loop dead, socket still bound) is taken over
   by the next start instead of blocking it (found during this run).
+- 0.2.1 (KB-16 review): a temporary shortcut-mode change that `dispose()` could not restore (KB-14: a dependent
+  key still held, the restore delay not elapsed, or the profile/mode changed meanwhile) is no longer dropped at
+  stop, Cleanup or quarantine export. The record is kept in `state.modeRecord`, reported by `status`, adopted at
+  the next start as an unresolved restoration (every press refused `busy` until it is restored) and restored by
+  `recover` on the original profile, exactly as the bridge does; harness: stop with a pending restoration,
+  restart, refusal, status, recover, presses accepted again.
 
 Harness: 143 checks (36 new: parsing, no-bank refusal, provisioning, the per-key report, Quickey executor
 press/Unpress, both unqualified-mix directions, bank status/teardown refusals, record kept and adopted,

@@ -51,7 +51,7 @@ input enabled at once are unqualified and not supported.
 
 | Suite | What it establishes | Does not establish |
 | --- | --- | --- |
-| `lua tools/ma3/test/surface_plugin_test.lua` (107 checks) | protocol, pairing, dedup, reconciliation, leases, floods on the stubbed loop, feedback deltas, kept records, quarantine, two instances, Cleanup | anything about the real `Keyboard()` route, the real readers or console timing |
+| `lua tools/ma3/test/surface_plugin_test.lua` (151 checks) | protocol, pairing, dedup, reconciliation, leases, floods on the stubbed loop, feedback deltas, kept records, quarantine, two instances, Cleanup | anything about the real `Keyboard()` route, the real readers or console timing |
 | `cargo test` in `service/` (36 tests) | framing and MAC, link state machine with a fake plugin, LED map and local fallback, NX-K decoder, M-Touch/M-Play decoder and output encoders against the MTouchPlay captures | USB behaviour, console behaviour |
 | `sh tools/ma3/test/e2e.sh` | the real service and the real plugin (stock Lua, stubbed console) across a real UDP socket | console latency, LEDs on hardware |
 

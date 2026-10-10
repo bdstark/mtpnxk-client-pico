@@ -672,6 +672,53 @@ check("a run that still ticks is left alone", findLog("already running") and sta
 state.ignoreNextCleanup = false; Cleanup()
 
 -------------------------------------------------------------------------------
+-- KB-16 review: a shortcut-mode restoration dispose() hands back (KB-14) is kept across stop/start,
+-- adopted as unresolved (presses refused), reported by status, and restored by recover.
+-------------------------------------------------------------------------------
+reset("key=" .. KEYHEX .. " input=fake")
+push({ t = "hello", v = 1, id = "nxk-m", gen = 1, nonce = "8888888888888888" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick(); drain()
+send({ t = "key", ev = 2, k = "Record", d = 0 }); tick(); drain()
+local minst = state.modules.hardkeys.instance
+local origDispose = minst.dispose
+-- The fake backend cannot change the mode, so the record is injected into the real dispose() result the
+-- way the module returns it when a restore is still pending at dispose.
+minst.dispose = function(self, t)
+  local r = origDispose(self, t)
+  r.mode = { id = "m7", profile = "Default", original = true, target = false, changedAt = t - 1, lastEventAt = t, owner = "nxk-m", purpose = "simulated text route", writes = 1,
+             unresolved = { reason = "disposed before the restore delay elapsed; restore pending", since = t }, pending = "delay" }
+  return r
+end
+state.running = true; state.ignoreNextCleanup = false
+Cleanup()
+check("a mode restoration record from dispose() is kept with its reason instead of being dropped", type(state.modeRecord) == "table" and state.modeRecord.id == "m7" and state.modeRecord.keptReason ~= nil and findLog("keeping the unresolved keyboard%-shortcut mode restoration m7") and next(state.modules) == nil, J({ tostring(state.modeRecord and state.modeRecord.id), lastLog() }))
+state.running = true
+Main(nil, "status")
+check("status reports the kept record while the plugin is not running", findLog("mode restoration record is kept from a previous run %(profile 'Default', shortcuts true %-> false"), lastLog())
+state.ignoreNextCleanup = false
+reset("key=" .. KEYHEX .. " input=fake")
+local st = state.modules.hardkeys.instance:status(clock.t)
+check("the next start adopts the record as an unresolved restoration and keeps nothing loose", state.modeRecord == nil and st.modeChange and st.modeChange.state == "unresolved" and st.modeChange.adopted == true and st.modeChange.profile == "Default" and findLog("adopted the unresolved keyboard%-shortcut mode restoration"), J({ tostring(state.modeRecord), tostring(st.modeChange and st.modeChange.state), lastLog() }))
+push({ t = "hello", v = 1, id = "nxk-m", gen = 2, nonce = "9999999999999999" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a press is refused while the adopted restoration is unresolved", ack and ack.ok == 0 and ack.code == "busy" and pressedCount() == 0, J(ack))
+state.running = true
+Main(nil, "status")
+check("status names the unresolved restoration on the instance", findLog("mode restoration m%d+ UNRESOLVED %(profile 'Default', shortcuts true %-> false%)"), lastLog())
+Main(nil, "recover")
+st = state.modules.hardkeys.instance:status(clock.t)
+check("recover re-reads the profile and the mode (already original on this console) and resolves the restoration without writing", st.modeChange == nil and st.lastModeChange and st.lastModeChange.state == "restored" and findLog("recover: keyboard%-shortcut mode restoration m%d+ restored %(profile 'Default', shortcuts back to true"), J({ tostring(st.modeChange and st.modeChange.state), tostring(st.lastModeChange and st.lastModeChange.state), lastLog() }))
+send({ t = "key", ev = 2, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("presses are accepted again after the restoration", ack and ack.ok == 1 and state.sessions[sid].holds.Record ~= nil, J(ack))
+send({ t = "key", ev = 3, k = "Record", d = 0 }); tick(); drain()
+state.ignoreNextCleanup = false; Cleanup()
+check("a clean stop with no pending restoration keeps no mode record", state.modeRecord == nil)
+
+-------------------------------------------------------------------------------
 -- Allow list, stop and Cleanup
 -------------------------------------------------------------------------------
 reset("key=" .. KEYHEX .. " input=fake bind=0.0.0.0 allow=10.1.1.1")
