@@ -8,9 +8,9 @@ key routes, ownership and leases, read-only state readers, continuous-control ad
 
 | Component | Version | Module API | Copied from |
 | --- | --- | --- | --- |
-| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `1f75481` (branch `feat/kb18-control-admission`; unchanged since `3960334`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
-| `gma3_mcp_feedback` | 0.3.0 | 1 | `1f75481` (unchanged since `c8dbb3a`, KB-17: control-context readers, `contextSnapshot()`/`watchContext()` with the binding generation incl. the whole selection identity after a validated traversal and every configured function); sha256 `7949a11282b97cdbf71cf596957f13231807b217c40c315e10623856053938c0` |
-| `gma3_mcp_control` | 0.1.0 | 1 | `1f75481` (KB-18: continuous-control events with admission against the binding generation, per-device ordering with loss reporting, coalescing, bounds, target ownership and the busy descriptor; fake backend only); sha256 `7f6f17ccc8e472b48c1cbf090beefb1a7674b318a7a635c4002558322343f954` |
+| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `0a05cd8` (branch `feat/kb18-control-admission`; unchanged since `3960334`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
+| `gma3_mcp_feedback` | 0.3.0 | 1 | `0a05cd8` (unchanged since `c8dbb3a`, KB-17: control-context readers, `contextSnapshot()`/`watchContext()` with the binding generation incl. the whole selection identity after a validated traversal and every configured function); sha256 `7949a11282b97cdbf71cf596957f13231807b217c40c315e10623856053938c0` |
+| `gma3_mcp_control` | 0.1.0 | 1 | `0a05cd8` (KB-18: continuous-control events with admission against the binding generation and revision, per-device ordering with loss reporting and late releases, coalescing, bounds with reserved release capacity, target ownership and the busy descriptor, batched recovery; fake backend only; the PR #22 review fixes are in); sha256 `ef68e5f0f7c12f0eb7e1dfca9ca7a9413404c71c5c9f6b80febdc9d1cf3d43d4` |
 
 Previous pins: hardkeys 0.10.0 / feedback 0.3.0 at `c8dbb3a` (KB-17); hardkeys 0.10.0 / feedback 0.2.0 at `3960334` (KB-15); hardkeys 0.5.0 `d73a8e10…` (PR #12, `6e0d9c1`), used by the KB-07/KB-08 records.
 

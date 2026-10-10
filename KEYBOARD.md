@@ -262,7 +262,9 @@ plugin's default `display=1` is the one that answers. Wiring the context into en
 
 The module half is in the MCP repository (`gma3_mcp_control` 0.1.0, bridge 0.14.0, branch `feat/kb18-control-admission`,
 PR bdstark/GrandMA3MCP#22, live record `docs/probes/kb-18-control-macos-2.5.1.md` there, 30/30). This repository vendors the
-0.10.0/0.3.0/0.1.0 set unchanged from `1f75481` ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md)) and adds the surface side:
+0.10.0/0.3.0/0.1.0 set unchanged from `0a05cd8` (the PR #22 review fixes included: late releases end their hold,
+reserved release capacity, batched recovery, rebound holds on the generation change itself, stale snapshots refused,
+binding revisions) ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md)) and adds the surface side:
 
 - **protocol** ([docs/surface-protocol.md](docs/surface-protocol.md) section 3a): one `ctl` message for relative motion,
   absolute positions, touches and buttons, each with device, control, the service's per-device sequence `es`, the binding
@@ -278,9 +280,10 @@ PR bdstark/GrandMA3MCP#22, live record `docs/probes/kb-18-control-macos-2.5.1.md
   through the backend and drop queued motion; a release the backend raised on is kept and adopted by the next
   `control=fake` start (`recover` re-attempts it); `status` prints the control line and its gestures. `control=fake|off`
   is a start argument, off by default (then `ctl` is acknowledged `control-disabled`); KB-18 ships the fake backend only.
-- **Rust service** (`src/link.rs`, `cargo test` 44, eight new): the four rotaries are encoder slots 1–4 and a push is a
+- **Rust service** (`src/link.rs`, `cargo test` 45, nine new): the four rotaries are encoder slots 1–4 and a push is a
   button; Bank held is the `fine` modifier. `control_event()` keeps per-device sequences and per-control gestures,
-  merges deltas and positions per control/generation/gesture, sends at most one motion packet per control per 5 ms
+  merges deltas per control/generation/gesture and positions only where the context reports a stateless fader
+  function (review: a crossfade's or Temp's positions are all kept, bounded per control), sends at most one motion packet per control per 5 ms
   (16 per tick) and drops queued motion older than 250 ms, against a moved generation or when the link goes down; a
   boundary flushes its control's motion first, is retransmitted, and a release supersedes an unacknowledged press.
   Without a known context motion and downs are dropped (`ctl_unbound`); a plugin reporting `control: 0` gets none

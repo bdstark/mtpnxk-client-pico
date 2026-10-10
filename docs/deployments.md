@@ -52,7 +52,7 @@ input enabled at once are unqualified and not supported.
 | Suite | What it establishes | Does not establish |
 | --- | --- | --- |
 | `lua tools/ma3/test/surface_plugin_test.lua` (187 checks) | protocol, pairing, dedup, reconciliation, leases, floods on the stubbed loop, feedback deltas and the KB-17 context, KB-18 control events (admission, coalescing, order, loss, boundaries, lapses, kept releases), kept records, quarantine, two instances, Cleanup | anything about the real `Keyboard()` route, the real readers or console timing |
-| `cargo test` in `service/` (44 tests) | framing and MAC, link state machine with a fake plugin (keys, context, KB-18 control events: binding, coalescing, rate and age bounds, boundaries, loss and refusals, repair), LED map and local fallback, NX-K decoder, M-Touch/M-Play decoder and output encoders against the MTouchPlay captures | USB behaviour, console behaviour |
+| `cargo test` in `service/` (45 tests) | framing and MAC, link state machine with a fake plugin (keys, context, KB-18 control events: binding, coalescing, rate and age bounds, boundaries, loss and refusals, repair), LED map and local fallback, NX-K decoder, M-Touch/M-Play decoder and output encoders against the MTouchPlay captures | USB behaviour, console behaviour |
 | `sh tools/ma3/test/e2e.sh` | the real service and the real plugin (stock Lua, stubbed console) across a real UDP socket, including rotary `ctl` events refused honestly by a console without an encoder bar | console latency, LEDs on hardware, anything moving on a console |
 
 Record new evidence as in the MCP repository's "Recording additional

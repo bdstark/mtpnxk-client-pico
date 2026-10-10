@@ -279,8 +279,11 @@ plugin  → service  ack { t:"ack", sid, seq, ev, ok, code?, why?, cg?, lost?, c
 | `fine` | the surface's explicit fine modifier (Bank held on the NX-K); what it means on the console is KB-19's |
 
 The service (`src/link.rs`) queues motion and merges it before sending: deltas of one control, generation and
-gesture add up, a newer position replaces the queued one, and at most one motion packet per control goes out every
-5 ms (16 per tick). Queued motion older than 250 ms, or whose generation is no longer the current `cg`, or that is
+gesture add up; a newer position replaces the queued one only for an encoder slot or an executor whose fader
+function the `context` message reports as stateless (`tok`/`fd` not `X`, `XA`, `XB`, crossfade or `Temp`), so a
+crossfade's `1.0 → 0.0` reaches the plugin as two positions and an executor the context does not list keeps every
+position (at most 64 per control; beyond that the oldest is dropped and counted `ctl_overflow`); at most one motion
+packet per control goes out every 5 ms (16 per tick). Queued motion older than 250 ms, or whose generation is no longer the current `cg`, or that is
 still queued when the link goes down, is dropped and counted, never sent late. A touch or button is a **boundary**:
 the control's queued motion goes out first, then the boundary, retransmitted like a key; a release stops the
 retransmission of the press it ends. Without a known context (no `context` with `known: 1` in this pairing within
@@ -290,7 +293,9 @@ gets no `ctl` packets at all (`ctl_unsupported`).
 The plugin maps the packet onto the vendored `gma3_mcp_control` module's event and acknowledges its outcome: the
 module's admission (session lease, order, rate, binding, target, ownership, bounds), its coalescing (within one
 session, device, control, target, generation, resolution, fine flag and gesture, never across a boundary), its
-absolute supersession rule (stateless functions only) and the busy descriptor are the MCP repository's
+absolute supersession rule (stateless functions only), its late-release rule (a delayed release newer than its own
+press still ends its hold), its binding revision (`stale-binding` when the plugin's spec changed; fixed here) and
+the busy descriptor are the MCP repository's
 (`docs/modules.md` there, "Continuous-control admission"). Its `service()` runs after the hardkeys and feedback
 services every tick and applies at most 4 intents through the backend; KB-18 ships the **fake backend only**
 (`control=fake`: intents recorded, nothing moves on the console). A session's lease lapse, `bye`, silence or the

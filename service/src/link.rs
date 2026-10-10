@@ -32,6 +32,8 @@ pub struct Config {
     pub ctl_per_tick: usize,
     /// KB-18: a relative gesture without a touch ends after this idle time (the next delta is a new gesture).
     pub gesture_idle: f64,
+    /// KB-18: queued motion entries per control; beyond it the oldest entry of that control is dropped.
+    pub motion_per_control: usize,
 }
 
 impl Default for Config {
@@ -50,6 +52,7 @@ impl Default for Config {
             motion_min_interval: 0.005,
             ctl_per_tick: 16,
             gesture_idle: 0.3,
+            motion_per_control: 64,
         }
     }
 }
@@ -91,7 +94,13 @@ pub struct Stats {
     pub ctl_refused: u64,
     pub ctl_lost_reported: u64,
     pub ctl_superseded: u64,
+    /// Positions dropped because a control's motion queue overflowed (stateful targets keep every position).
+    pub ctl_overflow: u64,
 }
+
+/// Fader functions whose value path matters (the same set as the console module's STATEFUL_FUNCTIONS):
+/// a queued position of such a target is never replaced by a newer one here.
+const STATEFUL_FUNCTIONS: [&str; 7] = ["x", "xa", "xb", "crossfade", "crossfadea", "crossfadeb", "temp"];
 
 /// KB-18: what a surface control did. `Abs` and `Touch` are produced by the M-Touch strips once KB-20
 /// wires them into the link; the transport treats them now (tests), the NX-K produces `Rel` and `Btn`.
@@ -399,6 +408,31 @@ impl Link {
         self.context_view(now).and_then(|c| c.generation)
     }
 
+    /// Whether a newer position may replace a queued one for this target (review 7): an encoder slot or an
+    /// executor whose configured fader function the context reports as stateless. Unknown means no: every
+    /// position is kept and the plugin decides.
+    fn position_supersedes(&self, tgt: &CtlTarget, now: f64) -> bool {
+        match tgt {
+            CtlTarget::Slot { .. } => true,
+            CtlTarget::Executor { ex, el } => {
+                if *el != "fader" {
+                    return false;
+                }
+                let Some(ctx) = self.context_view(now) else { return false };
+                let Some(exs) = ctx.body.get("ex").and_then(|v| v.as_array()) else { return false };
+                let Some(x) = exs.iter().find(|x| x.get("n").and_then(|n| n.as_u64()) == Some(*ex as u64)) else { return false };
+                let tok = x.get("tok").and_then(|t| t.as_str()).or_else(|| x.get("fd").and_then(|t| t.as_str()));
+                match tok {
+                    Some(t) => {
+                        let t = t.trim_start_matches("Fader").trim_start_matches("fader").to_ascii_lowercase();
+                        !t.is_empty() && !STATEFUL_FUNCTIONS.contains(&t.as_str())
+                    }
+                    None => false,
+                }
+            }
+        }
+    }
+
     /// KB-18: a surface control moved, was touched or pressed. Motion and positions are queued and merged
     /// until `tick` sends them (one packet per control per `motion_min_interval`, dropped after
     /// `motion_max_age` or when the binding generation moved: never sent late, never reinterpreted).
@@ -459,13 +493,23 @@ impl Link {
                     g.last_at = now;
                     g.id
                 };
-                if let Some(m) = self.motion.iter_mut().rev().find(|m| m.dev == dev && m.c == c) {
-                    if m.v.is_some() && m.cg == cg && m.gs == gs && m.tgt == tgt {
-                        // The newest position wins here; the plugin decides whether its target permits it.
-                        m.v = Some(v.clamp(0.0, 1.0));
-                        m.events += 1;
-                        self.stats.ctl_coalesced += 1;
-                        return;
+                // A newer position replaces the queued one only where the context says the target's function is
+                // stateless (review 7); crossfades, Temp and unknown targets keep every position in order.
+                if self.position_supersedes(&tgt, now) {
+                    if let Some(m) = self.motion.iter_mut().rev().find(|m| m.dev == dev && m.c == c) {
+                        if m.v.is_some() && m.cg == cg && m.gs == gs && m.tgt == tgt {
+                            m.v = Some(v.clamp(0.0, 1.0));
+                            m.events += 1;
+                            self.stats.ctl_coalesced += 1;
+                            return;
+                        }
+                    }
+                }
+                let queued = self.motion.iter().filter(|m| m.dev == dev && m.c == c).count();
+                if queued >= self.cfg.motion_per_control {
+                    if let Some(i) = self.motion.iter().position(|m| m.dev == dev && m.c == c) {
+                        self.motion.remove(i);
+                        self.stats.ctl_overflow += 1;
                     }
                 }
                 self.motion.push(Motion { dev: dev.into(), c: c.into(), tgt, cg, gs, fine: false, dx: 0, v: Some(v.clamp(0.0, 1.0)), first_at: now, events: 1 });
@@ -1287,6 +1331,12 @@ mod tests {
         let (mut link, mut plugin) = pair(40.0);
         link.receive(&plugin.context(1, 1, Some(1), json!({})), 40.0);
         let exec = CtlTarget::Executor { ex: 201, el: "fader" };
+        // The context says executor 201's fader is a Master: a newer position may replace a queued one.
+        let mut v = json!({"t":"context","gen":plugin.generation,"epoch":1,"known":1,"cg":1,"enc":{},"slots":[],"page":1,"pool":"Default","display":1,
+                           "ex":[{"n":201,"empty":0,"tgt":1,"fd":"Master","tok":"FaderMaster"},{"n":202,"empty":0,"tgt":1,"fd":"X","tok":"FaderX"}]});
+        v["sid"] = json!(plugin.sid);
+        let f = plugin.frame(v);
+        link.receive(&f, 40.0);
         link.control_event("mtouch", "Strip1", exec, CtlKind::Touch { down: true }, 40.0);
         link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.25 }, 40.001);
         link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.5 }, 40.002);
@@ -1369,5 +1419,64 @@ mod tests {
         assert_eq!(link.pending_count(), 0);
         assert_eq!(link.queued_motion(), 0);
         assert_eq!(plugin.decode(link.take_outgoing()).last().unwrap()["t"], "hello");
+    }
+    #[test]
+    fn positions_of_a_stateful_or_unknown_target_are_all_kept_in_order_and_bounded() {
+        let (mut link, mut plugin) = pair(80.0);
+        let mut v = json!({"t":"context","gen":plugin.generation,"epoch":1,"known":1,"cg":1,"enc":{},"slots":[],"page":1,"pool":"Default","display":1,
+                           "ex":[{"n":201,"empty":0,"tgt":1,"fd":"Master","tok":"FaderMaster"},{"n":202,"empty":0,"tgt":1,"fd":"X","tok":"FaderX"},{"n":203,"empty":0,"tgt":1,"fd":"Temp","tok":"FaderTemp"}]});
+        v["sid"] = json!(plugin.sid);
+        let f = plugin.frame(v);
+        link.receive(&f, 80.0);
+        // Review 7: a crossfade's 1.0 -> 0.0 pair must reach the plugin as two positions.
+        let x = CtlTarget::Executor { ex: 202, el: "fader" };
+        link.control_event("mtouch", "Strip2", x, CtlKind::Touch { down: true }, 80.0);
+        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 1.0 }, 80.001);
+        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 0.0 }, 80.002);
+        assert_eq!(link.queued_motion(), 2);
+        assert_eq!(link.stats.ctl_coalesced, 0);
+        link.tick(80.003);
+        let c: Vec<Value> = plugin.decode(link.take_outgoing());
+        let c = ctl_packets(&c);
+        assert_eq!(c.len(), 2, "touch down went out at once; the first position now, the second waits for the rate interval: {c:?}");
+        assert_eq!(c[1]["v"], 1.0);
+        link.tick(80.01);
+        let c2: Vec<Value> = plugin.decode(link.take_outgoing());
+        let c2 = ctl_packets(&c2);
+        assert_eq!(c2.len(), 1);
+        assert_eq!(c2[0]["v"], 0.0);
+        // Temp keeps its positions too; a Master merges; an executor the context does not list is kept whole.
+        let t = CtlTarget::Executor { ex: 203, el: "fader" };
+        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.0 }, 80.1);
+        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.3 }, 80.101);
+        let m = CtlTarget::Executor { ex: 201, el: "fader" };
+        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.1 }, 80.1);
+        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.2 }, 80.101);
+        let u = CtlTarget::Executor { ex: 299, el: "fader" };
+        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.1 }, 80.1);
+        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.2 }, 80.101);
+        assert_eq!(link.queued_motion(), 5);
+        assert_eq!(link.stats.ctl_coalesced, 1);
+        // A slot target merges (an attribute's value is stateless).
+        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.1 }, 80.2);
+        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.9 }, 80.201);
+        assert_eq!(link.stats.ctl_coalesced, 2);
+        // The per-control queue is bounded: beyond motion_per_control the oldest position of that control is dropped and counted.
+        let mut link2 = Link::new(Config { id: "nxk-test".into(), motion_per_control: 3, ..Config::default() }, Key::from_hex(&"0123456789abcdef".repeat(4)).unwrap(), 90.0);
+        let mut plugin2 = FakePlugin::new(Key::from_hex(&"0123456789abcdef".repeat(4)).unwrap());
+        link2.tick(90.0);
+        let hello = plugin2.decode(link2.take_outgoing());
+        let nonce = hello[0]["nonce"].as_str().unwrap().to_string();
+        let w = plugin2.welcome(&nonce);
+        link2.receive(&w, 90.01);
+        let mut v2 = json!({"t":"context","gen":plugin2.generation,"epoch":1,"known":1,"cg":1,"enc":{},"slots":[],"page":1,"pool":"Default","display":1,"ex":[{"n":202,"empty":0,"tgt":1,"fd":"X","tok":"FaderX"}]});
+        v2["sid"] = json!(plugin2.sid);
+        let f2 = plugin2.frame(v2);
+        link2.receive(&f2, 90.02);
+        for i in 0..5 {
+            link2.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: i as f64 / 10.0 }, 90.1 + i as f64 * 0.0001);
+        }
+        assert_eq!(link2.queued_motion(), 3);
+        assert_eq!(link2.stats.ctl_overflow, 2);
     }
 }
