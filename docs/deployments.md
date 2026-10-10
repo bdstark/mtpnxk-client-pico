@@ -1,6 +1,6 @@
 # Supported deployments (KB-08)
 
-Updated 2026-10-09. What has been qualified, on what, with which evidence, and
+Updated 2026-10-10. What has been qualified, on what, with which evidence, and
 what has not. Testing one row never establishes another. "Qualified" means a
 recorded live run on a disposable show at a stated revision; "harness" means
 stock-Lua or Rust tests with stubbed console dependencies; "unqualified" means
@@ -36,7 +36,7 @@ were qualified only as listed below.
 | User profile | `Default` only (one profile in the test show) | Profiles without shortcuts for Load, Macro, Thru keep those keys unsupported; a profile switch while paired is untested (a user switch is qualified: feedback is invalidated within ~1 s) |
 | Displays | One physical display (`display=1`) | Two displays. Input is **not display-routed** on 2.5.1 (MCP KB-01): a second-display test would show where pop-ups land, not route input; `display=` is API context only |
 | Show lifecycle | plugin stop/start, user switch | Show save and reload with the plugin running (harness only for the kept-records path; not issued live) |
-| Hardware | NX-K (VID `11be`, PID `e102`) over nusb on macOS | M-Touch, M-Play (protocol shared, never connected); encoders on any surface (carried as `wheel`, acknowledged `unsupported`) |
+| Hardware | NX-K (VID `11be`, PID `e102`) over nusb on macOS | M-Touch (PID `f808`) and M-Play (PID `f80c`): decoder and output encoders implemented from documented evidence (MTouchPlay `e48eb2c`), regression-tested (17 tests, [mtouch-protocol-reuse.md](mtouch-protocol-reuse.md)); **Qualified on macOS (protocol level, 2026-10-10)**: every documented control, report type, LED/bar/display write, idle poll, queued-at-open packets, unplug detection and replug on both devices ([M-Touch record](probes/kb-16-hardware-mtouch-macos.md), [M-Play record](probes/kb-16-hardware-mplay-macos.md)); not wired into the link (KB-20+), Windows and Linux hosts unqualified. Encoders on any surface (carried as `wheel`, acknowledged `unsupported`) |
 
 ## Surface: coexistence with the MCP bridge
 
@@ -51,8 +51,8 @@ input enabled at once are unqualified and not supported.
 
 | Suite | What it establishes | Does not establish |
 | --- | --- | --- |
-| `lua tools/ma3/test/surface_plugin_test.lua` (107 checks) | protocol, pairing, dedup, reconciliation, leases, floods on the stubbed loop, feedback deltas, kept records, quarantine, two instances, Cleanup | anything about the real `Keyboard()` route, the real readers or console timing |
-| `cargo test` in `service/` (19 tests) | framing and MAC, link state machine with a fake plugin, LED map and local fallback, decoder | USB behaviour, console behaviour |
+| `lua tools/ma3/test/surface_plugin_test.lua` (151 checks) | protocol, pairing, dedup, reconciliation, leases, floods on the stubbed loop, feedback deltas, kept records, quarantine, two instances, Cleanup | anything about the real `Keyboard()` route, the real readers or console timing |
+| `cargo test` in `service/` (36 tests) | framing and MAC, link state machine with a fake plugin, LED map and local fallback, NX-K decoder, M-Touch/M-Play decoder and output encoders against the MTouchPlay captures | USB behaviour, console behaviour |
 | `sh tools/ma3/test/e2e.sh` | the real service and the real plugin (stock Lua, stubbed console) across a real UDP socket | console latency, LEDs on hardware |
 
 Record new evidence as in the MCP repository's "Recording additional

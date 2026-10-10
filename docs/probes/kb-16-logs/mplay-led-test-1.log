@@ -1,0 +1,376 @@
+M-Play (no serial): LED test, 400 ms per step. Confirm each line by eye.
+  0x5502 SELECT [K]: blue  -> bRequest 0x80 wIndex 0x5502 wValue 0x0100 data -
+  0x5502 SELECT [K]: fast blink blue  -> bRequest 0x80 wIndex 0x5502 wValue 0x0500 data -
+  0x5502 SELECT [K]: off  -> bRequest 0x80 wIndex 0x5502 wValue 0x0000 data -
+  0x5503 RELEASE (Rel) [K]: blue  -> bRequest 0x80 wIndex 0x5503 wValue 0x0100 data -
+  0x5503 RELEASE (Rel) [K]: fast blink blue  -> bRequest 0x80 wIndex 0x5503 wValue 0x0500 data -
+  0x5503 RELEASE (Rel) [K]: off  -> bRequest 0x80 wIndex 0x5503 wValue 0x0000 data -
+  0x5504 BEAT [K]: red  -> bRequest 0x80 wIndex 0x5504 wValue 0x0002 data -
+  0x5504 BEAT [K]: fast blink red  -> bRequest 0x80 wIndex 0x5504 wValue 0x000A data -
+  0x5504 BEAT [K]: off  -> bRequest 0x80 wIndex 0x5504 wValue 0x0000 data -
+  0x5511 SNAP [K]: blue  -> bRequest 0x80 wIndex 0x5511 wValue 0x0100 data -
+  0x5511 SNAP [K]: fast blink blue  -> bRequest 0x80 wIndex 0x5511 wValue 0x0500 data -
+  0x5511 SNAP [K]: off  -> bRequest 0x80 wIndex 0x5511 wValue 0x0000 data -
+  0x5512 Pause (||/Back) [K]: red  -> bRequest 0x80 wIndex 0x5512 wValue 0x0002 data -
+  0x5512 Pause (||/Back) [K]: fast blink red  -> bRequest 0x80 wIndex 0x5512 wValue 0x000A data -
+  0x5512 Pause (||/Back) [K]: off  -> bRequest 0x80 wIndex 0x5512 wValue 0x0000 data -
+  0x5513 Next (Go) [K]: green  -> bRequest 0x80 wIndex 0x5513 wValue 0x0001 data -
+  0x5513 Next (Go) [K]: fast blink green  -> bRequest 0x80 wIndex 0x5513 wValue 0x0005 data -
+  0x5513 Next (Go) [K]: off  -> bRequest 0x80 wIndex 0x5513 wValue 0x0000 data -
+  0x9205 FADER PFD 1 [V]: red  -> bRequest 0x80 wIndex 0x9205 wValue 0x0002 data -
+  0x9205 FADER PFD 1 [V]: green  -> bRequest 0x80 wIndex 0x9205 wValue 0x0001 data -
+  0x9205 FADER PFD 1 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9205 wValue 0x000A data -
+  0x9205 FADER PFD 1 [V]: off  -> bRequest 0x80 wIndex 0x9205 wValue 0x0000 data -
+  0x9215 FADER PFD 2 [V]: red  -> bRequest 0x80 wIndex 0x9215 wValue 0x0002 data -
+  0x9215 FADER PFD 2 [V]: green  -> bRequest 0x80 wIndex 0x9215 wValue 0x0001 data -
+  0x9215 FADER PFD 2 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9215 wValue 0x000A data -
+  0x9215 FADER PFD 2 [V]: off  -> bRequest 0x80 wIndex 0x9215 wValue 0x0000 data -
+  0x9225 FADER PFD 3 [V]: red  -> bRequest 0x80 wIndex 0x9225 wValue 0x0002 data -
+  0x9225 FADER PFD 3 [V]: green  -> bRequest 0x80 wIndex 0x9225 wValue 0x0001 data -
+  0x9225 FADER PFD 3 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9225 wValue 0x000A data -
+  0x9225 FADER PFD 3 [V]: off  -> bRequest 0x80 wIndex 0x9225 wValue 0x0000 data -
+  0x9235 FADER PFD 4 [V]: red  -> bRequest 0x80 wIndex 0x9235 wValue 0x0002 data -
+  0x9235 FADER PFD 4 [V]: green  -> bRequest 0x80 wIndex 0x9235 wValue 0x0001 data -
+  0x9235 FADER PFD 4 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9235 wValue 0x000A data -
+  0x9235 FADER PFD 4 [V]: off  -> bRequest 0x80 wIndex 0x9235 wValue 0x0000 data -
+  0x9245 FADER PFD 5 [V]: red  -> bRequest 0x80 wIndex 0x9245 wValue 0x0002 data -
+  0x9245 FADER PFD 5 [V]: green  -> bRequest 0x80 wIndex 0x9245 wValue 0x0001 data -
+  0x9245 FADER PFD 5 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9245 wValue 0x000A data -
+  0x9245 FADER PFD 5 [V]: off  -> bRequest 0x80 wIndex 0x9245 wValue 0x0000 data -
+  0x9255 FADER PFD 6 [V]: red  -> bRequest 0x80 wIndex 0x9255 wValue 0x0002 data -
+  0x9255 FADER PFD 6 [V]: green  -> bRequest 0x80 wIndex 0x9255 wValue 0x0001 data -
+  0x9255 FADER PFD 6 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9255 wValue 0x000A data -
+  0x9255 FADER PFD 6 [V]: off  -> bRequest 0x80 wIndex 0x9255 wValue 0x0000 data -
+  0x9265 FADER PFD 7 [V]: red  -> bRequest 0x80 wIndex 0x9265 wValue 0x0002 data -
+  0x9265 FADER PFD 7 [V]: green  -> bRequest 0x80 wIndex 0x9265 wValue 0x0001 data -
+  0x9265 FADER PFD 7 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9265 wValue 0x000A data -
+  0x9265 FADER PFD 7 [V]: off  -> bRequest 0x80 wIndex 0x9265 wValue 0x0000 data -
+  0x9275 FADER PFD 8 [V]: red  -> bRequest 0x80 wIndex 0x9275 wValue 0x0002 data -
+  0x9275 FADER PFD 8 [V]: green  -> bRequest 0x80 wIndex 0x9275 wValue 0x0001 data -
+  0x9275 FADER PFD 8 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9275 wValue 0x000A data -
+  0x9275 FADER PFD 8 [V]: off  -> bRequest 0x80 wIndex 0x9275 wValue 0x0000 data -
+  0x9285 FADER PFD 9 [V]: red  -> bRequest 0x80 wIndex 0x9285 wValue 0x0002 data -
+  0x9285 FADER PFD 9 [V]: green  -> bRequest 0x80 wIndex 0x9285 wValue 0x0001 data -
+  0x9285 FADER PFD 9 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9285 wValue 0x000A data -
+  0x9285 FADER PFD 9 [V]: off  -> bRequest 0x80 wIndex 0x9285 wValue 0x0000 data -
+  0x9295 FADER PFD 10 [V]: red  -> bRequest 0x80 wIndex 0x9295 wValue 0x0002 data -
+  0x9295 FADER PFD 10 [V]: green  -> bRequest 0x80 wIndex 0x9295 wValue 0x0001 data -
+  0x9295 FADER PFD 10 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9295 wValue 0x000A data -
+  0x9295 FADER PFD 10 [V]: off  -> bRequest 0x80 wIndex 0x9295 wValue 0x0000 data -
+  0x92A5 FADER PFD 11 [V]: red  -> bRequest 0x80 wIndex 0x92A5 wValue 0x0002 data -
+  0x92A5 FADER PFD 11 [V]: green  -> bRequest 0x80 wIndex 0x92A5 wValue 0x0001 data -
+  0x92A5 FADER PFD 11 [V]: fast blink red  -> bRequest 0x80 wIndex 0x92A5 wValue 0x000A data -
+  0x92A5 FADER PFD 11 [V]: off  -> bRequest 0x80 wIndex 0x92A5 wValue 0x0000 data -
+  0x92B5 FADER PFD 12 [V]: red  -> bRequest 0x80 wIndex 0x92B5 wValue 0x0002 data -
+  0x92B5 FADER PFD 12 [V]: green  -> bRequest 0x80 wIndex 0x92B5 wValue 0x0001 data -
+  0x92B5 FADER PFD 12 [V]: fast blink red  -> bRequest 0x80 wIndex 0x92B5 wValue 0x000A data -
+  0x92B5 FADER PFD 12 [V]: off  -> bRequest 0x80 wIndex 0x92B5 wValue 0x0000 data -
+  0x92C5 FADER PFD 13 [V]: red  -> bRequest 0x80 wIndex 0x92C5 wValue 0x0002 data -
+  0x92C5 FADER PFD 13 [V]: green  -> bRequest 0x80 wIndex 0x92C5 wValue 0x0001 data -
+  0x92C5 FADER PFD 13 [V]: fast blink red  -> bRequest 0x80 wIndex 0x92C5 wValue 0x000A data -
+  0x92C5 FADER PFD 13 [V]: off  -> bRequest 0x80 wIndex 0x92C5 wValue 0x0000 data -
+  0x92D5 FADER PFD 14 [V]: red  -> bRequest 0x80 wIndex 0x92D5 wValue 0x0002 data -
+  0x92D5 FADER PFD 14 [V]: green  -> bRequest 0x80 wIndex 0x92D5 wValue 0x0001 data -
+  0x92D5 FADER PFD 14 [V]: fast blink red  -> bRequest 0x80 wIndex 0x92D5 wValue 0x000A data -
+  0x92D5 FADER PFD 14 [V]: off  -> bRequest 0x80 wIndex 0x92D5 wValue 0x0000 data -
+  0x92E5 FADER PFD 15 [V]: red  -> bRequest 0x80 wIndex 0x92E5 wValue 0x0002 data -
+  0x92E5 FADER PFD 15 [V]: green  -> bRequest 0x80 wIndex 0x92E5 wValue 0x0001 data -
+  0x92E5 FADER PFD 15 [V]: fast blink red  -> bRequest 0x80 wIndex 0x92E5 wValue 0x000A data -
+  0x92E5 FADER PFD 15 [V]: off  -> bRequest 0x80 wIndex 0x92E5 wValue 0x0000 data -
+  0x92F5 FADER PFD 16 [V]: red  -> bRequest 0x80 wIndex 0x92F5 wValue 0x0002 data -
+  0x92F5 FADER PFD 16 [V]: green  -> bRequest 0x80 wIndex 0x92F5 wValue 0x0001 data -
+  0x92F5 FADER PFD 16 [V]: fast blink red  -> bRequest 0x80 wIndex 0x92F5 wValue 0x000A data -
+  0x92F5 FADER PFD 16 [V]: off  -> bRequest 0x80 wIndex 0x92F5 wValue 0x0000 data -
+  0x9305 FADER PFD 17 [V]: red  -> bRequest 0x80 wIndex 0x9305 wValue 0x0002 data -
+  0x9305 FADER PFD 17 [V]: green  -> bRequest 0x80 wIndex 0x9305 wValue 0x0001 data -
+  0x9305 FADER PFD 17 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9305 wValue 0x000A data -
+  0x9305 FADER PFD 17 [V]: off  -> bRequest 0x80 wIndex 0x9305 wValue 0x0000 data -
+  0x9315 FADER PFD 18 [V]: red  -> bRequest 0x80 wIndex 0x9315 wValue 0x0002 data -
+  0x9315 FADER PFD 18 [V]: green  -> bRequest 0x80 wIndex 0x9315 wValue 0x0001 data -
+  0x9315 FADER PFD 18 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9315 wValue 0x000A data -
+  0x9315 FADER PFD 18 [V]: off  -> bRequest 0x80 wIndex 0x9315 wValue 0x0000 data -
+  0x9325 FADER PFD 19 [V]: red  -> bRequest 0x80 wIndex 0x9325 wValue 0x0002 data -
+  0x9325 FADER PFD 19 [V]: green  -> bRequest 0x80 wIndex 0x9325 wValue 0x0001 data -
+  0x9325 FADER PFD 19 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9325 wValue 0x000A data -
+  0x9325 FADER PFD 19 [V]: off  -> bRequest 0x80 wIndex 0x9325 wValue 0x0000 data -
+  0x9335 FADER PFD 20 [V]: red  -> bRequest 0x80 wIndex 0x9335 wValue 0x0002 data -
+  0x9335 FADER PFD 20 [V]: green  -> bRequest 0x80 wIndex 0x9335 wValue 0x0001 data -
+  0x9335 FADER PFD 20 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9335 wValue 0x000A data -
+  0x9335 FADER PFD 20 [V]: off  -> bRequest 0x80 wIndex 0x9335 wValue 0x0000 data -
+  0x9345 FADER PFD 21 [V]: red  -> bRequest 0x80 wIndex 0x9345 wValue 0x0002 data -
+  0x9345 FADER PFD 21 [V]: green  -> bRequest 0x80 wIndex 0x9345 wValue 0x0001 data -
+  0x9345 FADER PFD 21 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9345 wValue 0x000A data -
+  0x9345 FADER PFD 21 [V]: off  -> bRequest 0x80 wIndex 0x9345 wValue 0x0000 data -
+  0x9355 FADER PFD 22 [V]: red  -> bRequest 0x80 wIndex 0x9355 wValue 0x0002 data -
+  0x9355 FADER PFD 22 [V]: green  -> bRequest 0x80 wIndex 0x9355 wValue 0x0001 data -
+  0x9355 FADER PFD 22 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9355 wValue 0x000A data -
+  0x9355 FADER PFD 22 [V]: off  -> bRequest 0x80 wIndex 0x9355 wValue 0x0000 data -
+  0x9365 FADER PFD 23 [V]: red  -> bRequest 0x80 wIndex 0x9365 wValue 0x0002 data -
+  0x9365 FADER PFD 23 [V]: green  -> bRequest 0x80 wIndex 0x9365 wValue 0x0001 data -
+  0x9365 FADER PFD 23 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9365 wValue 0x000A data -
+  0x9365 FADER PFD 23 [V]: off  -> bRequest 0x80 wIndex 0x9365 wValue 0x0000 data -
+  0x9375 FADER PFD 24 [V]: red  -> bRequest 0x80 wIndex 0x9375 wValue 0x0002 data -
+  0x9375 FADER PFD 24 [V]: green  -> bRequest 0x80 wIndex 0x9375 wValue 0x0001 data -
+  0x9375 FADER PFD 24 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9375 wValue 0x000A data -
+  0x9375 FADER PFD 24 [V]: off  -> bRequest 0x80 wIndex 0x9375 wValue 0x0000 data -
+  0x9805 FADER EXT PF 1 [V]: red  -> bRequest 0x80 wIndex 0x9805 wValue 0x0002 data -
+  0x9805 FADER EXT PF 1 [V]: green  -> bRequest 0x80 wIndex 0x9805 wValue 0x0001 data -
+  0x9805 FADER EXT PF 1 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9805 wValue 0x000A data -
+  0x9805 FADER EXT PF 1 [V]: off  -> bRequest 0x80 wIndex 0x9805 wValue 0x0000 data -
+  0x9815 FADER EXT PF 2 [V]: red  -> bRequest 0x80 wIndex 0x9815 wValue 0x0002 data -
+  0x9815 FADER EXT PF 2 [V]: green  -> bRequest 0x80 wIndex 0x9815 wValue 0x0001 data -
+  0x9815 FADER EXT PF 2 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9815 wValue 0x000A data -
+  0x9815 FADER EXT PF 2 [V]: off  -> bRequest 0x80 wIndex 0x9815 wValue 0x0000 data -
+  0x9825 FADER EXT PF 3 [V]: red  -> bRequest 0x80 wIndex 0x9825 wValue 0x0002 data -
+  0x9825 FADER EXT PF 3 [V]: green  -> bRequest 0x80 wIndex 0x9825 wValue 0x0001 data -
+  0x9825 FADER EXT PF 3 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9825 wValue 0x000A data -
+  0x9825 FADER EXT PF 3 [V]: off  -> bRequest 0x80 wIndex 0x9825 wValue 0x0000 data -
+  0x9835 FADER EXT PF 4 [V]: red  -> bRequest 0x80 wIndex 0x9835 wValue 0x0002 data -
+  0x9835 FADER EXT PF 4 [V]: green  -> bRequest 0x80 wIndex 0x9835 wValue 0x0001 data -
+  0x9835 FADER EXT PF 4 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9835 wValue 0x000A data -
+  0x9835 FADER EXT PF 4 [V]: off  -> bRequest 0x80 wIndex 0x9835 wValue 0x0000 data -
+  0x9845 FADER EXT PF 5 [V]: red  -> bRequest 0x80 wIndex 0x9845 wValue 0x0002 data -
+  0x9845 FADER EXT PF 5 [V]: green  -> bRequest 0x80 wIndex 0x9845 wValue 0x0001 data -
+  0x9845 FADER EXT PF 5 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9845 wValue 0x000A data -
+  0x9845 FADER EXT PF 5 [V]: off  -> bRequest 0x80 wIndex 0x9845 wValue 0x0000 data -
+  0x9855 FADER EXT PF 6 [V]: red  -> bRequest 0x80 wIndex 0x9855 wValue 0x0002 data -
+  0x9855 FADER EXT PF 6 [V]: green  -> bRequest 0x80 wIndex 0x9855 wValue 0x0001 data -
+  0x9855 FADER EXT PF 6 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9855 wValue 0x000A data -
+  0x9855 FADER EXT PF 6 [V]: off  -> bRequest 0x80 wIndex 0x9855 wValue 0x0000 data -
+  0x9865 FADER EXT PF 7 [V]: red  -> bRequest 0x80 wIndex 0x9865 wValue 0x0002 data -
+  0x9865 FADER EXT PF 7 [V]: green  -> bRequest 0x80 wIndex 0x9865 wValue 0x0001 data -
+  0x9865 FADER EXT PF 7 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9865 wValue 0x000A data -
+  0x9865 FADER EXT PF 7 [V]: off  -> bRequest 0x80 wIndex 0x9865 wValue 0x0000 data -
+  0x9875 FADER EXT PF 8 [V]: red  -> bRequest 0x80 wIndex 0x9875 wValue 0x0002 data -
+  0x9875 FADER EXT PF 8 [V]: green  -> bRequest 0x80 wIndex 0x9875 wValue 0x0001 data -
+  0x9875 FADER EXT PF 8 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9875 wValue 0x000A data -
+  0x9875 FADER EXT PF 8 [V]: off  -> bRequest 0x80 wIndex 0x9875 wValue 0x0000 data -
+  0x9885 FADER EXT PF 9 [V]: red  -> bRequest 0x80 wIndex 0x9885 wValue 0x0002 data -
+  0x9885 FADER EXT PF 9 [V]: green  -> bRequest 0x80 wIndex 0x9885 wValue 0x0001 data -
+  0x9885 FADER EXT PF 9 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9885 wValue 0x000A data -
+  0x9885 FADER EXT PF 9 [V]: off  -> bRequest 0x80 wIndex 0x9885 wValue 0x0000 data -
+  0x9895 FADER EXT PF 10 [V]: red  -> bRequest 0x80 wIndex 0x9895 wValue 0x0002 data -
+  0x9895 FADER EXT PF 10 [V]: green  -> bRequest 0x80 wIndex 0x9895 wValue 0x0001 data -
+  0x9895 FADER EXT PF 10 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9895 wValue 0x000A data -
+  0x9895 FADER EXT PF 10 [V]: off  -> bRequest 0x80 wIndex 0x9895 wValue 0x0000 data -
+  0x98A5 FADER EXT PF 11 [V]: red  -> bRequest 0x80 wIndex 0x98A5 wValue 0x0002 data -
+  0x98A5 FADER EXT PF 11 [V]: green  -> bRequest 0x80 wIndex 0x98A5 wValue 0x0001 data -
+  0x98A5 FADER EXT PF 11 [V]: fast blink red  -> bRequest 0x80 wIndex 0x98A5 wValue 0x000A data -
+  0x98A5 FADER EXT PF 11 [V]: off  -> bRequest 0x80 wIndex 0x98A5 wValue 0x0000 data -
+  0x98B5 FADER EXT PF 12 [V]: red  -> bRequest 0x80 wIndex 0x98B5 wValue 0x0002 data -
+  0x98B5 FADER EXT PF 12 [V]: green  -> bRequest 0x80 wIndex 0x98B5 wValue 0x0001 data -
+  0x98B5 FADER EXT PF 12 [V]: fast blink red  -> bRequest 0x80 wIndex 0x98B5 wValue 0x000A data -
+  0x98B5 FADER EXT PF 12 [V]: off  -> bRequest 0x80 wIndex 0x98B5 wValue 0x0000 data -
+  0x98C5 FADER EXT PF 13 [V]: red  -> bRequest 0x80 wIndex 0x98C5 wValue 0x0002 data -
+  0x98C5 FADER EXT PF 13 [V]: green  -> bRequest 0x80 wIndex 0x98C5 wValue 0x0001 data -
+  0x98C5 FADER EXT PF 13 [V]: fast blink red  -> bRequest 0x80 wIndex 0x98C5 wValue 0x000A data -
+  0x98C5 FADER EXT PF 13 [V]: off  -> bRequest 0x80 wIndex 0x98C5 wValue 0x0000 data -
+  0x98D5 FADER EXT PF 14 [V]: red  -> bRequest 0x80 wIndex 0x98D5 wValue 0x0002 data -
+  0x98D5 FADER EXT PF 14 [V]: green  -> bRequest 0x80 wIndex 0x98D5 wValue 0x0001 data -
+  0x98D5 FADER EXT PF 14 [V]: fast blink red  -> bRequest 0x80 wIndex 0x98D5 wValue 0x000A data -
+  0x98D5 FADER EXT PF 14 [V]: off  -> bRequest 0x80 wIndex 0x98D5 wValue 0x0000 data -
+  0x98E5 FADER EXT PF 15 [V]: red  -> bRequest 0x80 wIndex 0x98E5 wValue 0x0002 data -
+  0x98E5 FADER EXT PF 15 [V]: green  -> bRequest 0x80 wIndex 0x98E5 wValue 0x0001 data -
+  0x98E5 FADER EXT PF 15 [V]: fast blink red  -> bRequest 0x80 wIndex 0x98E5 wValue 0x000A data -
+  0x98E5 FADER EXT PF 15 [V]: off  -> bRequest 0x80 wIndex 0x98E5 wValue 0x0000 data -
+  0x98F5 FADER EXT PF 16 [V]: red  -> bRequest 0x80 wIndex 0x98F5 wValue 0x0002 data -
+  0x98F5 FADER EXT PF 16 [V]: green  -> bRequest 0x80 wIndex 0x98F5 wValue 0x0001 data -
+  0x98F5 FADER EXT PF 16 [V]: fast blink red  -> bRequest 0x80 wIndex 0x98F5 wValue 0x000A data -
+  0x98F5 FADER EXT PF 16 [V]: off  -> bRequest 0x80 wIndex 0x98F5 wValue 0x0000 data -
+  0x9905 FADER EXT PF 17 [V]: red  -> bRequest 0x80 wIndex 0x9905 wValue 0x0002 data -
+  0x9905 FADER EXT PF 17 [V]: green  -> bRequest 0x80 wIndex 0x9905 wValue 0x0001 data -
+  0x9905 FADER EXT PF 17 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9905 wValue 0x000A data -
+  0x9905 FADER EXT PF 17 [V]: off  -> bRequest 0x80 wIndex 0x9905 wValue 0x0000 data -
+  0x9915 FADER EXT PF 18 [V]: red  -> bRequest 0x80 wIndex 0x9915 wValue 0x0002 data -
+  0x9915 FADER EXT PF 18 [V]: green  -> bRequest 0x80 wIndex 0x9915 wValue 0x0001 data -
+  0x9915 FADER EXT PF 18 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9915 wValue 0x000A data -
+  0x9915 FADER EXT PF 18 [V]: off  -> bRequest 0x80 wIndex 0x9915 wValue 0x0000 data -
+  0x9925 FADER EXT PF 19 [V]: red  -> bRequest 0x80 wIndex 0x9925 wValue 0x0002 data -
+  0x9925 FADER EXT PF 19 [V]: green  -> bRequest 0x80 wIndex 0x9925 wValue 0x0001 data -
+  0x9925 FADER EXT PF 19 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9925 wValue 0x000A data -
+  0x9925 FADER EXT PF 19 [V]: off  -> bRequest 0x80 wIndex 0x9925 wValue 0x0000 data -
+  0x9935 FADER EXT PF 20 [V]: red  -> bRequest 0x80 wIndex 0x9935 wValue 0x0002 data -
+  0x9935 FADER EXT PF 20 [V]: green  -> bRequest 0x80 wIndex 0x9935 wValue 0x0001 data -
+  0x9935 FADER EXT PF 20 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9935 wValue 0x000A data -
+  0x9935 FADER EXT PF 20 [V]: off  -> bRequest 0x80 wIndex 0x9935 wValue 0x0000 data -
+  0x9945 FADER EXT PF 21 [V]: red  -> bRequest 0x80 wIndex 0x9945 wValue 0x0002 data -
+  0x9945 FADER EXT PF 21 [V]: green  -> bRequest 0x80 wIndex 0x9945 wValue 0x0001 data -
+  0x9945 FADER EXT PF 21 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9945 wValue 0x000A data -
+  0x9945 FADER EXT PF 21 [V]: off  -> bRequest 0x80 wIndex 0x9945 wValue 0x0000 data -
+  0x9955 FADER EXT PF 22 [V]: red  -> bRequest 0x80 wIndex 0x9955 wValue 0x0002 data -
+  0x9955 FADER EXT PF 22 [V]: green  -> bRequest 0x80 wIndex 0x9955 wValue 0x0001 data -
+  0x9955 FADER EXT PF 22 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9955 wValue 0x000A data -
+  0x9955 FADER EXT PF 22 [V]: off  -> bRequest 0x80 wIndex 0x9955 wValue 0x0000 data -
+  0x9965 FADER EXT PF 23 [V]: red  -> bRequest 0x80 wIndex 0x9965 wValue 0x0002 data -
+  0x9965 FADER EXT PF 23 [V]: green  -> bRequest 0x80 wIndex 0x9965 wValue 0x0001 data -
+  0x9965 FADER EXT PF 23 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9965 wValue 0x000A data -
+  0x9965 FADER EXT PF 23 [V]: off  -> bRequest 0x80 wIndex 0x9965 wValue 0x0000 data -
+  0x9975 FADER EXT PF 24 [V]: red  -> bRequest 0x80 wIndex 0x9975 wValue 0x0002 data -
+  0x9975 FADER EXT PF 24 [V]: green  -> bRequest 0x80 wIndex 0x9975 wValue 0x0001 data -
+  0x9975 FADER EXT PF 24 [V]: fast blink red  -> bRequest 0x80 wIndex 0x9975 wValue 0x000A data -
+  0x9975 FADER EXT PF 24 [V]: off  -> bRequest 0x80 wIndex 0x9975 wValue 0x0000 data -
+  0x9203 FADER LEVEL 1 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000010000000000
+  0x9203 FADER LEVEL 1 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000030000000000
+  0x9203 FADER LEVEL 1 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000070000000000
+  0x9203 FADER LEVEL 1 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 0000000f0000000000
+  0x9203 FADER LEVEL 1 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 0000001f0000000000
+  0x9203 FADER LEVEL 1 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 0000003f0000000000
+  0x9203 FADER LEVEL 1 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 0000007f0000000000
+  0x9203 FADER LEVEL 1 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000ff0000000000
+  0x9203 FADER LEVEL 1 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000ff0100000000
+  0x9203 FADER LEVEL 1 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000ff0300000000
+  0x9203 FADER LEVEL 1 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 1f0000e00300000000
+  0x9203 FADER LEVEL 1 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000ff0380000000
+  0x9203 FADER LEVEL 1 [F]: off  -> bRequest 0x61 wIndex 0x9203 wValue 0x0000 data 000000000000000000
+  0x9213 FADER LEVEL 2 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000010000000000
+  0x9213 FADER LEVEL 2 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000030000000000
+  0x9213 FADER LEVEL 2 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000070000000000
+  0x9213 FADER LEVEL 2 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 0000000f0000000000
+  0x9213 FADER LEVEL 2 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 0000001f0000000000
+  0x9213 FADER LEVEL 2 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 0000003f0000000000
+  0x9213 FADER LEVEL 2 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 0000007f0000000000
+  0x9213 FADER LEVEL 2 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000ff0000000000
+  0x9213 FADER LEVEL 2 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000ff0100000000
+  0x9213 FADER LEVEL 2 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000ff0300000000
+  0x9213 FADER LEVEL 2 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 1f0000e00300000000
+  0x9213 FADER LEVEL 2 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000ff0380000000
+  0x9213 FADER LEVEL 2 [F]: off  -> bRequest 0x61 wIndex 0x9213 wValue 0x0000 data 000000000000000000
+  0x9223 FADER LEVEL 3 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000010000000000
+  0x9223 FADER LEVEL 3 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000030000000000
+  0x9223 FADER LEVEL 3 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000070000000000
+  0x9223 FADER LEVEL 3 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 0000000f0000000000
+  0x9223 FADER LEVEL 3 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 0000001f0000000000
+  0x9223 FADER LEVEL 3 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 0000003f0000000000
+  0x9223 FADER LEVEL 3 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 0000007f0000000000
+  0x9223 FADER LEVEL 3 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000ff0000000000
+  0x9223 FADER LEVEL 3 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000ff0100000000
+  0x9223 FADER LEVEL 3 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000ff0300000000
+  0x9223 FADER LEVEL 3 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 1f0000e00300000000
+  0x9223 FADER LEVEL 3 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000ff0380000000
+  0x9223 FADER LEVEL 3 [F]: off  -> bRequest 0x61 wIndex 0x9223 wValue 0x0000 data 000000000000000000
+  0x9233 FADER LEVEL 4 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000010000000000
+  0x9233 FADER LEVEL 4 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000030000000000
+  0x9233 FADER LEVEL 4 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000070000000000
+  0x9233 FADER LEVEL 4 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 0000000f0000000000
+  0x9233 FADER LEVEL 4 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 0000001f0000000000
+  0x9233 FADER LEVEL 4 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 0000003f0000000000
+  0x9233 FADER LEVEL 4 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 0000007f0000000000
+  0x9233 FADER LEVEL 4 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000ff0000000000
+  0x9233 FADER LEVEL 4 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000ff0100000000
+  0x9233 FADER LEVEL 4 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000ff0300000000
+  0x9233 FADER LEVEL 4 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 1f0000e00300000000
+  0x9233 FADER LEVEL 4 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000ff0380000000
+  0x9233 FADER LEVEL 4 [F]: off  -> bRequest 0x61 wIndex 0x9233 wValue 0x0000 data 000000000000000000
+  0x9243 FADER LEVEL 5 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000010000000000
+  0x9243 FADER LEVEL 5 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000030000000000
+  0x9243 FADER LEVEL 5 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000070000000000
+  0x9243 FADER LEVEL 5 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 0000000f0000000000
+  0x9243 FADER LEVEL 5 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 0000001f0000000000
+  0x9243 FADER LEVEL 5 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 0000003f0000000000
+  0x9243 FADER LEVEL 5 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 0000007f0000000000
+  0x9243 FADER LEVEL 5 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000ff0000000000
+  0x9243 FADER LEVEL 5 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000ff0100000000
+  0x9243 FADER LEVEL 5 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000ff0300000000
+  0x9243 FADER LEVEL 5 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 1f0000e00300000000
+  0x9243 FADER LEVEL 5 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000ff0380000000
+  0x9243 FADER LEVEL 5 [F]: off  -> bRequest 0x61 wIndex 0x9243 wValue 0x0000 data 000000000000000000
+  0x9253 FADER LEVEL 6 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000010000000000
+  0x9253 FADER LEVEL 6 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000030000000000
+  0x9253 FADER LEVEL 6 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000070000000000
+  0x9253 FADER LEVEL 6 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 0000000f0000000000
+  0x9253 FADER LEVEL 6 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 0000001f0000000000
+  0x9253 FADER LEVEL 6 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 0000003f0000000000
+  0x9253 FADER LEVEL 6 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 0000007f0000000000
+  0x9253 FADER LEVEL 6 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000ff0000000000
+  0x9253 FADER LEVEL 6 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000ff0100000000
+  0x9253 FADER LEVEL 6 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000ff0300000000
+  0x9253 FADER LEVEL 6 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 1f0000e00300000000
+  0x9253 FADER LEVEL 6 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000ff0380000000
+  0x9253 FADER LEVEL 6 [F]: off  -> bRequest 0x61 wIndex 0x9253 wValue 0x0000 data 000000000000000000
+  0x9263 FADER LEVEL 7 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000010000000000
+  0x9263 FADER LEVEL 7 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000030000000000
+  0x9263 FADER LEVEL 7 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000070000000000
+  0x9263 FADER LEVEL 7 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 0000000f0000000000
+  0x9263 FADER LEVEL 7 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 0000001f0000000000
+  0x9263 FADER LEVEL 7 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 0000003f0000000000
+  0x9263 FADER LEVEL 7 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 0000007f0000000000
+  0x9263 FADER LEVEL 7 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000ff0000000000
+  0x9263 FADER LEVEL 7 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000ff0100000000
+  0x9263 FADER LEVEL 7 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000ff0300000000
+  0x9263 FADER LEVEL 7 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 1f0000e00300000000
+  0x9263 FADER LEVEL 7 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000ff0380000000
+  0x9263 FADER LEVEL 7 [F]: off  -> bRequest 0x61 wIndex 0x9263 wValue 0x0000 data 000000000000000000
+  0x9273 FADER LEVEL 8 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000010000000000
+  0x9273 FADER LEVEL 8 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000030000000000
+  0x9273 FADER LEVEL 8 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000070000000000
+  0x9273 FADER LEVEL 8 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 0000000f0000000000
+  0x9273 FADER LEVEL 8 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 0000001f0000000000
+  0x9273 FADER LEVEL 8 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 0000003f0000000000
+  0x9273 FADER LEVEL 8 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 0000007f0000000000
+  0x9273 FADER LEVEL 8 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000ff0000000000
+  0x9273 FADER LEVEL 8 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000ff0100000000
+  0x9273 FADER LEVEL 8 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000ff0300000000
+  0x9273 FADER LEVEL 8 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 1f0000e00300000000
+  0x9273 FADER LEVEL 8 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000ff0380000000
+  0x9273 FADER LEVEL 8 [F]: off  -> bRequest 0x61 wIndex 0x9273 wValue 0x0000 data 000000000000000000
+  0x9283 FADER LEVEL 9 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000010000000000
+  0x9283 FADER LEVEL 9 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000030000000000
+  0x9283 FADER LEVEL 9 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000070000000000
+  0x9283 FADER LEVEL 9 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 0000000f0000000000
+  0x9283 FADER LEVEL 9 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 0000001f0000000000
+  0x9283 FADER LEVEL 9 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 0000003f0000000000
+  0x9283 FADER LEVEL 9 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 0000007f0000000000
+  0x9283 FADER LEVEL 9 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000ff0000000000
+  0x9283 FADER LEVEL 9 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000ff0100000000
+  0x9283 FADER LEVEL 9 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000ff0300000000
+  0x9283 FADER LEVEL 9 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 1f0000e00300000000
+  0x9283 FADER LEVEL 9 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000ff0380000000
+  0x9283 FADER LEVEL 9 [F]: off  -> bRequest 0x61 wIndex 0x9283 wValue 0x0000 data 000000000000000000
+  0x9293 FADER LEVEL 10 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000010000000000
+  0x9293 FADER LEVEL 10 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000030000000000
+  0x9293 FADER LEVEL 10 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000070000000000
+  0x9293 FADER LEVEL 10 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 0000000f0000000000
+  0x9293 FADER LEVEL 10 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 0000001f0000000000
+  0x9293 FADER LEVEL 10 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 0000003f0000000000
+  0x9293 FADER LEVEL 10 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 0000007f0000000000
+  0x9293 FADER LEVEL 10 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000ff0000000000
+  0x9293 FADER LEVEL 10 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000ff0100000000
+  0x9293 FADER LEVEL 10 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000ff0300000000
+  0x9293 FADER LEVEL 10 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 1f0000e00300000000
+  0x9293 FADER LEVEL 10 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000ff0380000000
+  0x9293 FADER LEVEL 10 [F]: off  -> bRequest 0x61 wIndex 0x9293 wValue 0x0000 data 000000000000000000
+  0x92A3 FADER LEVEL 11 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000010000000000
+  0x92A3 FADER LEVEL 11 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000030000000000
+  0x92A3 FADER LEVEL 11 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000070000000000
+  0x92A3 FADER LEVEL 11 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 0000000f0000000000
+  0x92A3 FADER LEVEL 11 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 0000001f0000000000
+  0x92A3 FADER LEVEL 11 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 0000003f0000000000
+  0x92A3 FADER LEVEL 11 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 0000007f0000000000
+  0x92A3 FADER LEVEL 11 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000ff0000000000
+  0x92A3 FADER LEVEL 11 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000ff0100000000
+  0x92A3 FADER LEVEL 11 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000ff0300000000
+  0x92A3 FADER LEVEL 11 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 1f0000e00300000000
+  0x92A3 FADER LEVEL 11 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000ff0380000000
+  0x92A3 FADER LEVEL 11 [F]: off  -> bRequest 0x61 wIndex 0x92A3 wValue 0x0000 data 000000000000000000
+  0x92B3 FADER LEVEL 12 [F]: 1 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000010000000000
+  0x92B3 FADER LEVEL 12 [F]: 2 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000030000000000
+  0x92B3 FADER LEVEL 12 [F]: 3 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000070000000000
+  0x92B3 FADER LEVEL 12 [F]: 4 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 0000000f0000000000
+  0x92B3 FADER LEVEL 12 [F]: 5 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 0000001f0000000000
+  0x92B3 FADER LEVEL 12 [F]: 6 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 0000003f0000000000
+  0x92B3 FADER LEVEL 12 [F]: 7 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 0000007f0000000000
+  0x92B3 FADER LEVEL 12 [F]: 8 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000ff0000000000
+  0x92B3 FADER LEVEL 12 [F]: 9 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000ff0100000000
+  0x92B3 FADER LEVEL 12 [F]: 10 of 10 lit from the bottom, Red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000ff0300000000
+  0x92B3 FADER LEVEL 12 [F]: bottom 5 green, top 5 red  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 1f0000e00300000000
+  0x92B3 FADER LEVEL 12 [F]: all 10 red, blinking  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000ff0380000000
+  0x92B3 FADER LEVEL 12 [F]: off  -> bRequest 0x61 wIndex 0x92B3 wValue 0x0000 data 000000000000000000
+  0x9F01 FADER BANK Number (display) [D]: 1  -> bRequest 0x54 wIndex 0x9F01 wValue 0x0000 data 000006000000
+  0x9F01 FADER BANK Number (display) [D]: 42  -> bRequest 0x54 wIndex 0x9F01 wValue 0x0000 data 00005b660000
+  0x9F01 FADER BANK Number (display) [D]: 999  -> bRequest 0x54 wIndex 0x9F01 wValue 0x0000 data 00006f6f6f00
+  0x9F01 FADER BANK Number (display) [D]: blank  -> bRequest 0x54 wIndex 0x9F01 wValue 0x0000 data 000000000000
+  0x9E01 FADER EXT BANK Number (display) [D]: 1  -> bRequest 0x54 wIndex 0x9E01 wValue 0x0000 data 000006000000
+  0x9E01 FADER EXT BANK Number (display) [D]: 42  -> bRequest 0x54 wIndex 0x9E01 wValue 0x0000 data 00005b660000
+  0x9E01 FADER EXT BANK Number (display) [D]: 999  -> bRequest 0x54 wIndex 0x9E01 wValue 0x0000 data 00006f6f6f00
+  0x9E01 FADER EXT BANK Number (display) [D]: blank  -> bRequest 0x54 wIndex 0x9E01 wValue 0x0000 data 000000000000
+done: every K/V/L key, every F bar and every display of the M-Play was written

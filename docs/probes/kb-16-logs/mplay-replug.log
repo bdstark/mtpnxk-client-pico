@@ -1,0 +1,12 @@
+Error: no M-Touch (11be:f808) or M-Play (11be:f80c) found
+Error: no M-Touch (11be:f808) or M-Play (11be:f80c) found
+Error: no M-Touch (11be:f808) or M-Play (11be:f80c) found
+Error: no M-Touch (11be:f808) or M-Play (11be:f80c) found
+M-Play (no serial) (11be:f80c) open; listening on EP 0x82 for 45 s ... (touch faders / press keys)
+    6.379  KEY   0x5502 SELECT state=1 (press)  raw=0102025501
+    6.897  KEY   0x5502 SELECT state=0 (release)  raw=0102025500
+M-Play: read failed: unknown (error 0xe00002ed); device gone?
+    9.657  M-Play disconnected
+--- 9.7 s: 2 events; reports by type: key=2; idle polls=1191 (123.3/s)
+--- report interval: min 518.4 ms, max 518.4 ms (between non-empty packets)
+retries=4

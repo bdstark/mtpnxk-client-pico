@@ -24,7 +24,7 @@ package.preload["socket"] = function() return { gettime = function() return cloc
 -- Console stubs (the KB-01 default profile subset, plus EDIT mapped to E so a generic key resolves).
 local logs = {}
 Echo = function(m) logs[#logs + 1] = m end; ErrEcho = Echo; Printf = Echo; ErrPrintf = Echo
-Enums = { VirtualKeyCode = { PLEASE = 84, STORE = 66, ESC = 88, CLEAR = 87, OOPS = 86, EXEC = 35, EDIT = 40, COPY = 41, HIGHLIGHT = 50, PLUS = 77, MINUS = 79, MA1 = 1, MA2 = 2,
+Enums = { VirtualKeyCode = { PLEASE = 84, STORE = 66, ESC = 88, CLEAR = 87, OOPS = 86, UNDO = 86, EXEC = 35, EDIT = 40, COPY = 41, HIGHLIGHT = 50, PLUS = 77, MINUS = 79, MA1 = 1, MA2 = 2, THRU = 78, FIXTURE = 56,
                              NUM0 = 67, NUM1 = 68, NUM2 = 69, NUM3 = 70, NUM4 = 71, NUM5 = 72, NUM6 = 73, NUM7 = 74, NUM8 = 75, NUM9 = 76 },
           KeyboardCodes = { Enter = 257, Escape = 256, Delete = 261, Backspace = 259, S = 83, E = 69, LeftShift = 340, Equal = 61, kpAdd = 334, Minus = 45, kpSubtract = 333, ["0"] = 48, ["1"] = 49, ["2"] = 50, ["3"] = 51, ["4"] = 52, ["5"] = 53, ["6"] = 54, ["7"] = 55, ["8"] = 56, ["9"] = 57 } }
 keyboardCalls = {}
@@ -38,6 +38,7 @@ local function h(props) return { Get = function(_, k) return props[k] end } end
 CurrentProfile = function()
   return { name = profile.name, Environments = h({ ActiveEnvironment = console.env }), KeyboardShortCuts = {
     Get = function(_, k) if k == "KeyboardShortcutsActive" then return console.shortcuts end end,
+    Set = function(_, k, v) if k == "KeyboardShortcutsActive" then console.shortcuts = tostring(v) end end,
     Count = function() return #profile.rows end, Ptr = function(_, i) local r = profile.rows[i]; return r and h(r) end } }
 end
 GetDisplayByIndex = function(n) if n == 1 then return h({ PreviewBarActive = console.previewBar }) end return nil end
@@ -49,7 +50,62 @@ ShowData = function() return { Masters = { Grand = { Blind = h({ FaderEnabled = 
 CurrentExecPage = function() return { name = "Page " .. console.page, Get = function(_, k) if k == "No" then return console.page end end } end
 CurrentUser = function() return { name = console.user } end
 SelectedSequence = function() return nil end
-ObjectList = function() return {} end
+-- Fake Quickey pool and executor page (KB-12/KB-13): the console objects the vendored module creates,
+-- verifies and presses through ObjectList()/Cmd(); the commands issued are recorded for the checks.
+local pool = { quickeys = {}, executors = {}, pages = { [1] = true }, pressed = {}, cmds = {}, failUnpress = false }
+local function execKey(page, index) return page .. "." .. index end
+local function quickeyHandle(i, q)
+  return { name = q.name, index = i, GetClass = function() return "Quickey" end,
+           Get = function(_, k) if k == "Code" then return q.code elseif k == "Note" then return q.note elseif k == "Lock" then return q.lock end end,
+           Set = function(_, k, v) if k == "Code" then q.code = v elseif k == "Name" then q.name = v elseif k == "Note" then q.note = v end end }
+end
+local function assignedQuickey(page, index)
+  local x = pool.executors[execKey(page, index)]
+  if type(x) == "table" and x.quickey and pool.quickeys[x.quickey] then return x.quickey end
+  return nil
+end
+ObjectList = function(ref)
+  local qi = ref:match("^Quickey (%d+)$")
+  if qi then local q = pool.quickeys[tonumber(qi)]; if q then return { quickeyHandle(tonumber(qi), q) } end return {} end
+  local page, index = ref:match("^Page (%d+)%.(%d+)$")
+  if page then
+    local qidx = assignedQuickey(tonumber(page), tonumber(index))
+    if not qidx then return {} end
+    return { { GetClass = function() return "Executor" end, Get = function(_, k) if k == "Object" then return quickeyHandle(qidx, pool.quickeys[qidx]) end end } }
+  end
+  local p = ref:match("^Page (%d+)$")
+  if p and pool.pages[tonumber(p)] then return { { name = "Page " .. p } } end
+  return {}
+end
+DataPool = function() return { name = "Default" } end
+Cmd = function(line)
+  pool.cmds[#pool.cmds + 1] = line
+  local n = line:match("^Store Quickey (%d+)")
+  if n then pool.quickeys[tonumber(n)] = pool.quickeys[tonumber(n)] or { name = "Quickey " .. n, code = "", note = "" }; return "OK" end
+  n = line:match("^Delete Quickey (%d+)")
+  if n then
+    pool.quickeys[tonumber(n)] = nil
+    for k, x in pairs(pool.executors) do if type(x) == "table" and x.quickey == tonumber(n) then pool.executors[k] = "empty" end end
+    return "OK"
+  end
+  local q, pg, ix = line:match("^Assign Quickey (%d+) At Page (%d+)%.(%d+)")
+  if q then if pool.executors[execKey(tonumber(pg), tonumber(ix))] == nil then return "Object not found" end pool.executors[execKey(tonumber(pg), tonumber(ix))] = { quickey = tonumber(q) }; return "OK" end
+  pg, ix = line:match("^Delete Page (%d+)%.(%d+)")
+  if pg then pool.executors[execKey(tonumber(pg), tonumber(ix))] = "empty"; return "OK" end
+  pg, ix = line:match("^Press Page (%d+)%.(%d+)$")
+  if pg then local qi = assignedQuickey(tonumber(pg), tonumber(ix)); if not qi then return "Object not found" end pool.pressed[execKey(tonumber(pg), tonumber(ix))] = qi; return "OK" end
+  pg, ix = line:match("^Unpress Page (%d+)%.(%d+)$")
+  if pg then
+    if pool.failUnpress then return "Object not found" end
+    local qi = assignedQuickey(tonumber(pg), tonumber(ix)); if not qi then return "Object not found" end
+    pool.pressed[execKey(tonumber(pg), tonumber(ix))] = nil; return "OK"
+  end
+  return "OK"
+end
+local function pageWithExecutors(page, first, count) pool.pages[page] = true; for i = 0, count - 1 do pool.executors[execKey(page, first + i)] = "empty" end end
+local function pressedCount() local n = 0; for _ in pairs(pool.pressed) do n = n + 1 end; return n end
+local function quickeyCount() local n = 0; for _ in pairs(pool.quickeys) do n = n + 1 end; return n end
+local function lastCmd(pat) for i = #pool.cmds, 1, -1 do if pool.cmds[i]:find(pat) then return pool.cmds[i] end end return nil end
 GetExecutor = function() return nil end
 Version = function() return "2.5.1.0" end
 
@@ -113,7 +169,7 @@ check("bad option refused", select(2, state._parseArgument("key=x bogus")) ~= ni
 check("start without a key is refused", reset("input=fake") == false and findLog("pairing key is required"))
 check("start with a short key is refused", reset("key=abcd input=fake") == false)
 check("start with a key succeeds on the fake backend", reset() == true and state.inputEnabled == true and state.inputMode == "fake" and state.gen:match("^%d+%-%x%x%x%x%x%x%x%x$"), J({ state.inputMode, state.gen }))
-check("modules loaded (vendored versions)", state.modules.hardkeys.version == "0.5.0" and state.modules.feedback.version == "0.2.0", J(state.moduleVersions))
+check("modules loaded (vendored versions)", state.modules.hardkeys.version == "0.10.0" and state.modules.feedback.version == "0.2.0", J(state.moduleVersions))
 check("feedback watch list bounded (9 items for the NX-K)", state.modules.feedback.instance:status().watched == 9)
 
 -------------------------------------------------------------------------------
@@ -128,9 +184,9 @@ check("hello answered with a welcome", welcome and welcome.nonce == hello.nonce 
 local function has(list, v) for _, x in ipairs(list or {}) do if x == v then return true end end return false end
 check("welcome reports key resolution as sorted lists", welcome and has(welcome.keys.ok, "Record") and has(welcome.keys.ok, "Enter") and has(welcome.keys.ok, "5") and has(welcome.keys.ok, "Edit") and has(welcome.keys.unsupported, "Copy") and has(welcome.keys.unsupported, "Bank") and has(welcome.keys.unsupported, "Thru") and has(welcome.keys.ok, "+") and has(welcome.keys.ok, "-") and #welcome.keys.ok == 17, J(welcome and welcome.keys))
 check("unsupported reasons are logged at start, never guessed", state.keyReasons.Copy:find("no keyboard shortcut maps to COPY") and state.keyReasons.Update:find("not an Enums.VirtualKeyCode") and state.keyReasons.Bank == "not a console key" and findLog("key Copy unsupported"), J(state.keyReasons))
-check("an ambiguous keypad key resolves through the preferred keypad row of the shortcut table", findLog("key %+: PLUS resolved through the preferred row kpAdd") and findLog("key %-: MINUS resolved through the preferred row kpSubtract"), lastLog())
+check("an ambiguous keypad key resolves through the preferred keypad row of the shortcut table", findLog("key %+: PLUS via shortcut %(fake, shortcut%-table%) preferred row kpAdd") and findLog("key %-: MINUS via shortcut %(fake, shortcut%-table%) preferred row kpSubtract"), lastLog())
 check("welcome fits the service's datagram limit", #outbox == 0 or true)
-check("welcome carries module versions, input mode, protocol", welcome and welcome.modules.gma3_mcp_hardkeys == "0.5.0" and welcome.input == "fake" and welcome.v == 1 and welcome.epoch == 1, J(welcome))
+check("welcome carries module versions, input mode, protocol", welcome and welcome.modules.gma3_mcp_hardkeys == "0.10.0" and welcome.input == "fake" and welcome.backend == "fake" and welcome.v == 1 and welcome.epoch == 1, J(welcome))
 check("keys physically down in the hello are not pressed", eventCount("press") == 0 and findLog("1 key%(s%) physically down, not pressed"))
 local first = ofType(out, "state")[1]
 check("a full state follows the welcome immediately (items not yet read are unknown)", first and first.full == 1 and first.s.freeze == "?" and (first.s.page == "?" or first.s.page == 3), J(first))
@@ -213,7 +269,10 @@ send({ t = "key", ev = 17, k = "+", d = 0 }); tick(); drain()
 console.shortcuts = "false"
 send({ t = "key", ev = 18, k = "+", d = 1 }); tick()
 ack = ofType(drain(), "ack")[1]
-check("'+' is refused while shortcuts are inactive (no raw bypass)", ack and ack.ok == 0 and ack.code == "unsupported" and ack.why:find("inactive"), J(ack))
+check("'+' while shortcuts are inactive: the module enables them for the hold (KB-14), never a raw bypass", ack and ack.ok == 1 and console.shortcuts == "true" and events()[#events()].pcKey == "kpAdd", J({ ack, console.shortcuts }))
+send({ t = "key", ev = 90, k = "+", d = 0 }); tick(); drain()
+for _ = 1, 8 do tickAlive(0.016); drain() end
+check("the shortcut mode is restored one restore delay after the release", console.shortcuts == "false" and state.modules.hardkeys.instance:status().modeChange == nil, J({ console.shortcuts, state.modules.hardkeys.instance:status().modeChange }))
 console.shortcuts = "true"
 -------------------------------------------------------------------------------
 -- Review findings: superseded events, outcome replay
@@ -473,6 +532,191 @@ send({ t = "key", ev = 2, k = "Record", d = 1 }); tick()
 ack = ofType(drain(), "ack")[1]
 check("the paired surface can press again after recovery", ack and ack.ok == 1 and eventCount("press") == 1, J(ack))
 state.running = true; state.ignoreNextCleanup = false; Cleanup()
+
+-------------------------------------------------------------------------------
+-- KB-15: Quickey bank, mixed backend, explicit routing, no fallback
+-------------------------------------------------------------------------------
+local BANK = "bank=900/1.180-191"
+o, e = state._parseArgument("key=" .. KEYHEX .. " " .. BANK .. " input=mixed route=Undo:quickkey,2:shortcut bankcodes=hardkeys")
+check("bank, input=mixed, route and bankcodes parse", o and o.bank.quickeyFirst == 900 and o.bank.page == 1 and o.bank.executorFirst == 180 and o.bank.executorCount == 12 and o.input == "mixed" and o.routes.OOPS == "quickkey" and o.routes.NUM2 == "shortcut" and o.bankCodes == "hardkeys", J({ o, e }))
+o = state._parseArgument("key=" .. KEYHEX .. " bank=900/1.180 input=quickkey")
+check("a bank range without -last reserves maxHolds executors; quickkey is an alias of quickey", o and o.bank.executorCount == 12 and o.input == "quickey", J(o))
+check("bank commands parse", state._parseArgument("bank status").command == "bank-status" and state._parseArgument("bank verify").command == "bank-verify" and state._parseArgument("bank teardown").command == "bank-teardown")
+check("bad bank arguments are refused", select(2, state._parseArgument("bank")) ~= nil and select(2, state._parseArgument("bank=900")) ~= nil and select(2, state._parseArgument("bankcodes=qualified")) ~= nil and select(2, state._parseArgument("route=2:type")) ~= nil and select(2, state._parseArgument("route=Bogus:shortcut")) ~= nil and select(2, state._parseArgument("input=fake route=1:quickkey")) ~= nil)
+
+-- No bank: the Quickey modes report the requirement and press nothing; nothing falls back to Keyboard().
+pageWithExecutors(1, 180, 12)
+reset("key=" .. KEYHEX .. " input=mixed")
+check("input=mixed without a bank refuses input (no silent keyboard fallback)", state.inputEnabled == false and state.inputMode == "off" and findLog("no Quickey bank is provisioned") and #pool.cmds == 0, lastLog())
+state.running = true; state.ignoreNextCleanup = false; Cleanup()
+
+-- Provisioning through the operator's argument, the mixed backend, the per-key table.
+pool.cmds = {}
+reset("key=" .. KEYHEX .. " " .. BANK .. " input=mixed")
+check("bank= provisions one Quickey per KB-10 qualified code plus the placeholder (codes=qualified by default)", quickeyCount() == 10 and findLog("bank provision: 10 Quickey%(s%) created, 0 reused") and findLog("state=ready codes=9 %(qualified 9, discovered 0%)"), J({ quickeyCount(), lastLog() }))
+check("input is enabled on the mixed backend with the quickkey default", state.inputEnabled == true and state.backendName == "mixed" and findLog("input enabled on the mixed backend %(routing default quickkey"), lastLog())
+check("the start reports the part that presses each key", findLog("key 1: NUM1 via quickkey %(quickey") and findLog("key 2: NUM2 via shortcut %(keyboard") and findLog("key Record: STORE via quickkey %(quickey") and findLog("key Undo: OOPS via shortcut %(keyboard"), J(state.routes))
+push({ t = "hello", v = 1, id = "nxk-q", gen = 1, nonce = "3333333333333333" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+check("the welcome names the backend and keeps every surface key usable", welcome.backend == "mixed" and welcome.input == "mixed" and #welcome.keys.ok == 18 and welcome.keys.ok[17] == "Thru", J(welcome.keys))
+keyboardCalls = {}
+send({ t = "key", ev = 1, k = "1", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+local holds = state.modules.hardkeys.instance:status().holds
+check("'1' is an executor press of the owned Quickey (quickey part), not a Keyboard() event", ack and ack.ok == 1 and lastCmd("^Press Page 1%.18%d$") and pressedCount() == 1 and #keyboardCalls == 0 and holds[#holds].backend == "quickey", J({ ack, pool.cmds[#pool.cmds], holds[#holds] and holds[#holds].backend }))
+send({ t = "key", ev = 2, k = "2", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a PC key while a Quickey is held is refused as an unqualified mix (nothing dispatched)", ack and ack.ok == 0 and ack.code == "unqualified-mix" and #keyboardCalls == 0, J(ack))
+send({ t = "key", ev = 3, k = "1", d = 0 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("the release is the Unpress of the recorded executor", ack and ack.ok == 1 and lastCmd("^Unpress Page 1%.18%d$") and pressedCount() == 0, J({ ack, pool.cmds[#pool.cmds] }))
+send({ t = "key", ev = 4, k = "2", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("'2' goes through the keyboard part (shortcut table, explicit override)", ack and ack.ok == 1 and #keyboardCalls == 1 and keyboardCalls[1].key == "2", J({ ack, keyboardCalls }))
+send({ t = "key", ev = 5, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a Quickey while a PC key is held is refused as an unqualified mix", ack and ack.ok == 0 and ack.code == "unqualified-mix" and pressedCount() == 0, J(ack))
+send({ t = "key", ev = 6, k = "2", d = 0 }); tick(); drain()
+send({ t = "key", ev = 7, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+send({ t = "key", ev = 8, k = "Record", d = 0 }); tick(); drain()
+check("Record (STORE) is a Quickey hold once the PC key is up", ack and ack.ok == 1 and lastCmd("^Unpress Page 1%.18%d$") and pressedCount() == 0, J(ack))
+state.running = true
+Main(nil, "bank status")
+check("bank status reports the live bank", findLog("bank status: bank mtpnxk_surface@q900%.e1%.180%-191 state=ready"), lastLog())
+state.ignoreNextCleanup = false
+send({ t = "key", ev = 9, k = "1", d = 1 }); tick(); drain()
+Main(nil, "bank teardown")
+check("teardown is refused while a Quickey record is live", findLog("bank teardown refused %[bank%-in%-use%]") and quickeyCount() == 10, lastLog())
+state.ignoreNextCleanup = false
+send({ t = "key", ev = 10, k = "1", d = 0 }); tick(); drain()
+Cleanup()
+check("cleanup keeps the bank record and touches no console object", state.bankRecord and state.bankRecord.id == "mtpnxk_surface@q900.e1.180-191" and quickeyCount() == 10 and findLog("bank record mtpnxk_surface@q900.e1.180%-191 kept"), lastLog())
+local creates = 0; for _, c in ipairs(pool.cmds) do if c:find("^Store Quickey") then creates = creates + 1 end end
+reset("key=" .. KEYHEX .. " " .. BANK .. " input=mixed")
+local creates2 = 0; for _, c in ipairs(pool.cmds) do if c:find("^Store Quickey") then creates2 = creates2 + 1 end end
+check("the next start adopts the kept bank (verified, nothing created) and ignores the same bank= argument", state.bankRecord == nil and creates2 == creates and findLog("bank adopt: bank mtpnxk_surface@q900.e1.180%-191 state=ready") and findLog("is already live") and state.inputEnabled == true, lastLog())
+
+-- Recovery goes through the part that pressed the record.
+push({ t = "hello", v = 1, id = "nxk-q", gen = 2, nonce = "4444444444444444" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "5", d = 1 }); tick(); drain()
+pool.failUnpress = true
+send({ t = "key", ev = 2, k = "5", d = 0 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a Quickey release the console refuses is acknowledged unresolved", ack and ack.ok == 0 and ack.code == "unresolved", J(ack))
+state.running = true; state.ignoreNextCleanup = false; Cleanup()
+pool.failUnpress = false
+check("cleanup keeps the unresolved Quickey record with its executor target", #state.unresolved == 1 and state.unresolved[1].backend == "quickey" and state.unresolved[1].target and state.unresolved[1].target.executor, J(state.unresolved))
+reset("key=" .. KEYHEX .. " input=off")
+check("a start with input off adopts the bank and the record", state.modules.hardkeys.instance:status().unresolved == 1 and state.modules.hardkeys.instance:bankStatus(clock.t).provisioned == true and state.inputEnabled == false)
+state.running = true
+Main(nil, "recover")
+check("recover attaches the quickey part for cleanup and releases through the recorded executor", findLog("recover: quickey backend attached for cleanup only") and findLog("recover: released NUM5") and pressedCount() == 0 and state.modules.hardkeys.instance:status().unresolved == 0, lastLog())
+state.ignoreNextCleanup = false; Cleanup()
+
+-- Quickeys only: unqualified keys are refused, an override to another method is refused as a policy.
+reset("key=" .. KEYHEX .. " input=quickey")
+push({ t = "hello", v = 1, id = "nxk-q", gen = 3, nonce = "5555555555555555" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+check("input=quickey supports only the hold-qualified keys", state.backendName == "quickey" and #welcome.keys.ok == 6 and welcome.keys.ok[1] == "1" and welcome.keys.ok[2] == "5" and welcome.keys.ok[3] == "Clear" and welcome.keys.ok[4] == "Enter" and welcome.keys.ok[5] == "Record" and welcome.keys.ok[6] == "Thru" and state.keyReasons.Undo:find("no KB%-10 hold evidence"), J({ welcome.keys.ok, state.keyReasons.Undo }))
+keyboardCalls = {}
+send({ t = "key", ev = 1, k = "2", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("'2' on the Quickey backend is refused (not in the bank), never typed", ack and ack.ok == 0 and #keyboardCalls == 0 and pressedCount() == 0, J(ack))
+send({ t = "key", ev = 2, k = "Undo", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("Undo (OOPS, tap-only evidence) is refused as a hold on the Quickey backend", ack and ack.ok == 0 and pressedCount() == 0, J(ack))
+state.running = true; state.ignoreNextCleanup = false; Cleanup()
+reset("key=" .. KEYHEX .. " input=quickey route=2:shortcut")
+check("a shortcut override on the Quickey backend is refused as a policy the backend cannot serve", state.inputEnabled == false and findLog("enableInput failed %[policy%-unavailable%]"), lastLog())
+state.running = true; state.ignoreNextCleanup = false; Cleanup()
+reset("key=" .. KEYHEX .. " input=keyboard route=1:quickkey")
+check("a quickkey override on the keyboard backend is refused the same way", state.inputEnabled == false and findLog("enableInput failed %[policy%-unavailable%]"), lastLog())
+state.running = true; state.ignoreNextCleanup = false; Cleanup()
+reset("key=" .. KEYHEX .. " input=mixed route=Undo:quickkey")
+check("an override that resolves to an unusable route refuses the start (inert configuration)", state.inputEnabled == false and findLog("route Undo:quickkey cannot be served now"), lastLog())
+state.running = true; state.ignoreNextCleanup = false; Cleanup()
+
+-- Teardown removes only verified owned objects; afterwards Quickey routes are refused, not replaced.
+reset("key=" .. KEYHEX .. " input=mixed")
+state.running = true
+Main(nil, "bank teardown")
+check("teardown deletes the owned Quickeys and clears the reserved executors", quickeyCount() == 0 and findLog("bank teardown: 10 Quickey%(s%) removed, 12 executor%(s%) cleared, 0 skipped") and state.bankRecord == nil, lastLog())
+push({ t = "hello", v = 1, id = "nxk-q", gen = 4, nonce = "6666666666666666" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+keyboardCalls = {}
+send({ t = "key", ev = 1, k = "1", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("after teardown a Quickey key is refused, not pressed through Keyboard()", ack and ack.ok == 0 and #keyboardCalls == 0 and pressedCount() == 0, J(ack))
+state.ignoreNextCleanup = false; Cleanup()
+check("cleanup after teardown keeps no bank record", state.bankRecord == nil)
+
+-- ReloadAllPlugins kills the loop without its shutdown: the next Main must take the stale state over.
+pageWithExecutors(1, 180, 12)
+reset("key=" .. KEYHEX .. " " .. BANK .. " input=mixed")
+push({ t = "hello", v = 1, id = "nxk-q", gen = 5, nonce = "7777777777777777" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "1", d = 1 }); tick(); drain()
+check("a Quickey is held before the simulated reload", pressedCount() == 1)
+clock.t = clock.t + 5  -- no tick: the loop is dead, state.running stays true, the socket stays referenced
+local oldGen = state.gen
+Main(nil, "key=" .. KEYHEX .. " input=fake")
+check("a stale run is taken over: its hold released through the old instance, the bank record kept, a new generation started", findLog("has not ticked for 5%.0 s") and pressedCount() == 0 and state.gen ~= oldGen and state.running == true and state.inputMode == "fake" and state.bankRecord == nil and state.modules.hardkeys.instance:bankStatus(clock.t).provisioned == true, J({ lastLog(), pressedCount(), state.gen, oldGen, state.inputMode }))
+state.ignoreNextCleanup = false; Cleanup()
+reset("key=" .. KEYHEX .. " input=fake")
+tick()
+state.running = true
+Main(nil, "key=" .. KEYHEX .. " input=fake")
+check("a run that still ticks is left alone", findLog("already running") and state.running == true, lastLog())
+state.ignoreNextCleanup = false; Cleanup()
+
+-------------------------------------------------------------------------------
+-- KB-16 review: a shortcut-mode restoration dispose() hands back (KB-14) is kept across stop/start,
+-- adopted as unresolved (presses refused), reported by status, and restored by recover.
+-------------------------------------------------------------------------------
+reset("key=" .. KEYHEX .. " input=fake")
+push({ t = "hello", v = 1, id = "nxk-m", gen = 1, nonce = "8888888888888888" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick(); drain()
+send({ t = "key", ev = 2, k = "Record", d = 0 }); tick(); drain()
+local minst = state.modules.hardkeys.instance
+local origDispose = minst.dispose
+-- The fake backend cannot change the mode, so the record is injected into the real dispose() result the
+-- way the module returns it when a restore is still pending at dispose.
+minst.dispose = function(self, t)
+  local r = origDispose(self, t)
+  r.mode = { id = "m7", profile = "Default", original = true, target = false, changedAt = t - 1, lastEventAt = t, owner = "nxk-m", purpose = "simulated text route", writes = 1,
+             unresolved = { reason = "disposed before the restore delay elapsed; restore pending", since = t }, pending = "delay" }
+  return r
+end
+state.running = true; state.ignoreNextCleanup = false
+Cleanup()
+check("a mode restoration record from dispose() is kept with its reason instead of being dropped", type(state.modeRecord) == "table" and state.modeRecord.id == "m7" and state.modeRecord.keptReason ~= nil and findLog("keeping the unresolved keyboard%-shortcut mode restoration m7") and next(state.modules) == nil, J({ tostring(state.modeRecord and state.modeRecord.id), lastLog() }))
+state.running = true
+Main(nil, "status")
+check("status reports the kept record while the plugin is not running", findLog("mode restoration record is kept from a previous run %(profile 'Default', shortcuts true %-> false"), lastLog())
+state.ignoreNextCleanup = false
+reset("key=" .. KEYHEX .. " input=fake")
+local st = state.modules.hardkeys.instance:status(clock.t)
+check("the next start adopts the record as an unresolved restoration and keeps nothing loose", state.modeRecord == nil and st.modeChange and st.modeChange.state == "unresolved" and st.modeChange.adopted == true and st.modeChange.profile == "Default" and findLog("adopted the unresolved keyboard%-shortcut mode restoration"), J({ tostring(state.modeRecord), tostring(st.modeChange and st.modeChange.state), lastLog() }))
+push({ t = "hello", v = 1, id = "nxk-m", gen = 2, nonce = "9999999999999999" }); tick()
+welcome = ofType(drain(), "welcome")[1]; sid, seq = welcome.sid, 0
+send({ t = "key", ev = 1, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("a press is refused while the adopted restoration is unresolved", ack and ack.ok == 0 and ack.code == "busy" and pressedCount() == 0, J(ack))
+state.running = true
+Main(nil, "status")
+check("status names the unresolved restoration on the instance", findLog("mode restoration m%d+ UNRESOLVED %(profile 'Default', shortcuts true %-> false%)"), lastLog())
+Main(nil, "recover")
+st = state.modules.hardkeys.instance:status(clock.t)
+check("recover re-reads the profile and the mode (already original on this console) and resolves the restoration without writing", st.modeChange == nil and st.lastModeChange and st.lastModeChange.state == "restored" and findLog("recover: keyboard%-shortcut mode restoration m%d+ restored %(profile 'Default', shortcuts back to true"), J({ tostring(st.modeChange and st.modeChange.state), tostring(st.lastModeChange and st.lastModeChange.state), lastLog() }))
+send({ t = "key", ev = 2, k = "Record", d = 1 }); tick()
+ack = ofType(drain(), "ack")[1]
+check("presses are accepted again after the restoration", ack and ack.ok == 1 and state.sessions[sid].holds.Record ~= nil, J(ack))
+send({ t = "key", ev = 3, k = "Record", d = 0 }); tick(); drain()
+state.ignoreNextCleanup = false; Cleanup()
+check("a clean stop with no pending restoration keeps no mode record", state.modeRecord == nil)
 
 -------------------------------------------------------------------------------
 -- Allow list, stop and Cleanup

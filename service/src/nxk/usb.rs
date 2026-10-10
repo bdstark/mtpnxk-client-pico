@@ -49,27 +49,35 @@ pub fn list() -> Result<Vec<String>> {
         .collect())
 }
 
+/// Finds `vid:pid`, opens it, makes sure it is configured, claims interface 0 and selects
+/// alternate setting 1. Shared by the NX-K and the M-Touch / M-Play, which use the same
+/// vendor-class layout. Returns the product label (serial or "(no serial)") and the interface.
+pub fn claim_vendor_interface(vid: u16, pid: u16, label: &str) -> Result<(String, nusb::Interface)> {
+    let info = nusb::list_devices()
+        .wait()
+        .context("listing USB devices")?
+        .find(|d| d.vendor_id() == vid && d.product_id() == pid)
+        .ok_or_else(|| anyhow!("no {label} ({vid:04x}:{pid:04x}) found; on Windows bind WinUSB to it with Zadig"))?;
+    let name = format!("{label} {}", info.serial_number().unwrap_or("(no serial)"));
+    let device = info.open().wait().with_context(|| format!("opening the {label}"))?;
+    // The device may sit unconfigured (no SET_CONFIGURATION yet, as on a fresh macOS attach);
+    // claiming an interface then fails with "interface not found".
+    let configured = device.active_configuration().map(|c| c.configuration_value()).unwrap_or(0);
+    if configured == 0 {
+        let first = device.configurations().next().map(|c| c.configuration_value()).unwrap_or(1);
+        device.set_configuration(first).wait().with_context(|| format!("selecting configuration {first}"))?;
+    }
+    let interface = device.claim_interface(INTERFACE).wait().with_context(|| {
+        let ifaces: Vec<String> = info.interfaces().map(|i| format!("{} ({:02x}/{:02x}/{:02x})", i.interface_number(), i.class(), i.subclass(), i.protocol())).collect();
+        format!("claiming interface 0 (is another program using the {label}?); interfaces reported: {ifaces:?}")
+    })?;
+    interface.set_alt_setting(ALT_SETTING).wait().context("selecting alternate setting 1")?;
+    Ok((name, interface))
+}
+
 impl UsbKeypad {
     pub fn open() -> Result<UsbKeypad> {
-        let info = nusb::list_devices()
-            .wait()
-            .context("listing USB devices")?
-            .find(|d| d.vendor_id() == VID && d.product_id() == PID)
-            .ok_or_else(|| anyhow!("no NX-K ({VID:04x}:{PID:04x}) found; on Windows bind WinUSB to it with Zadig"))?;
-        let name = format!("NX-K {}", info.serial_number().unwrap_or("(no serial)"));
-        let device = info.open().wait().context("opening the NX-K")?;
-        // The keypad may sit unconfigured (no SET_CONFIGURATION yet, as on a fresh macOS attach);
-        // claiming an interface then fails with "interface not found".
-        let configured = device.active_configuration().map(|c| c.configuration_value()).unwrap_or(0);
-        if configured == 0 {
-            let first = device.configurations().next().map(|c| c.configuration_value()).unwrap_or(1);
-            device.set_configuration(first).wait().with_context(|| format!("selecting configuration {first}"))?;
-        }
-        let interface = device.claim_interface(INTERFACE).wait().with_context(|| {
-            let ifaces: Vec<String> = info.interfaces().map(|i| format!("{} ({:02x}/{:02x}/{:02x})", i.interface_number(), i.class(), i.subclass(), i.protocol())).collect();
-            format!("claiming interface 0 (is another program using the keypad?); interfaces reported: {ifaces:?}")
-        })?;
-        interface.set_alt_setting(ALT_SETTING).wait().context("selecting alternate setting 1")?;
+        let (name, interface) = claim_vendor_interface(VID, PID, "NX-K")?;
         let mut ep = interface.endpoint::<Interrupt, In>(ENDPOINT_IN).context("opening interrupt IN 0x82")?;
 
         let (ev_tx, ev_rx) = mpsc::channel::<Event>();

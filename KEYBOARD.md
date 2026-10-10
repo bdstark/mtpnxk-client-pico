@@ -1,6 +1,6 @@
-# KB-07 and KB-08 in mtpnxk: the surface consumer and its qualification
+# KB-07, KB-08 and KB-15 in mtpnxk: the surface consumer and its qualification
 
-Updated: 2026-10-09. The feature series KB-01 to KB-09 is defined and tracked in
+Updated: 2026-10-09 (KB-15 surface half added, see the last section). The feature series KB-01 to KB-09 is defined and tracked in
 [bdstark/GrandMA3MCP `KEYBOARD.md`](https://github.com/bdstark/GrandMA3MCP/blob/main/KEYBOARD.md).
 KB-01 to KB-06 are complete there (macOS, onPC 2.5.1.0) and provide the reusable
 console modules this repository vendors. KB-07 (the surface consumer) and KB-08
@@ -60,7 +60,7 @@ carries each limit's measured status.
 | Part | Where | Verified by |
 | --- | --- | --- |
 | Surface plugin (Lua, runs in onPC) | [tools/ma3/mtpnxk_surface.lua](tools/ma3/mtpnxk_surface.lua) 0.1.0, [mtpnxk_surface.xml](tools/ma3/mtpnxk_surface.xml) | `lua tools/ma3/test/surface_plugin_test.lua` — 107 checks under stock Lua with stubbed console and socket: SipHash vectors, pairing/replay/MAC rejection, press/release/dedup/old-seq/reordering/superseded, duplicate acks replaying the original outcome, unsupported keys, heartbeat reconciliation (lost release released, lost press reported not pressed), lease expiry/revival/forgetting, restart via new hello, capacity, per-session rate limit, a 10 000-datagram flood not starving a lapsed lease, feedback deltas/full/unknown/stalled reader/epoch bump/identity uncertainty, keyboard backend calls, bench mode, the bridge courtesy check, two independent instances, allow list, kept records adopted across a restart, `recover`, a quarantined instance whose `dispose()` raises, control calls and Cleanup |
-| Vendored console modules | [tools/ma3/gma3_mcp_hardkeys.lua](tools/ma3/gma3_mcp_hardkeys.lua) 0.5.0, [gma3_mcp_feedback.lua](tools/ma3/gma3_mcp_feedback.lua) 0.2.0, [VENDOR.md](tools/ma3/VENDOR.md) (commits and hashes) | the MCP repository's harnesses (`npm test` there) |
+| Vendored console modules | [tools/ma3/gma3_mcp_hardkeys.lua](tools/ma3/gma3_mcp_hardkeys.lua) 0.10.0 (0.5.0 at the KB-07/KB-08 records), [gma3_mcp_feedback.lua](tools/ma3/gma3_mcp_feedback.lua) 0.2.0, [VENDOR.md](tools/ma3/VENDOR.md) (commits and hashes) | the MCP repository's harnesses (`npm test` there) |
 | Surface service (Rust) | [service](service) — `auth` (framing, SipHash), `protocol`, `link` (pairing, seq/ev, retransmit, heartbeat, watchdog, state cache), `leds` (NX-K map, local fallback), `nxk` (decoder, USB via nusb), `sim`/`bench` | `cargo test` — 19 tests incl. a fake plugin exercising retransmission and loss, a release stopping its press's retransmission, nonce mismatch, old seqs, full/delta/epoch freshness, watchdog and re-pairing, `no-session` recovery, forged packets, LED diffs and the local fallback |
 | The two together, no console | [tools/ma3/test/e2e.sh](tools/ma3/test/e2e.sh) | the real plugin under stock Lua with a stubbed console behind a UDP relay, driven by the real service: pairing, acks, a retransmission with zero losses, two refused keys, an abandoned session released by the lease, a 100-tap bench |
 
@@ -174,3 +174,58 @@ acceptance record. Not closed as a pass on the p99 or flood limits.
    KB-08 record.
 4. Windows qualification (WinUSB via Zadig) and a separate-machine LAN run when hardware allows.
 5. Probe encoder input before routing wheels; keep them unsupported until a route is verified.
+
+## KB-15 — Surface defaults, migration and qualification (surface half, 2026-10-09)
+
+The module and bridge half is in the MCP repository (hardkeys 0.10.0, bridge 0.12.0, branch
+`feat/kb15-mixed-backend`). This repository vendors 0.10.0 unchanged ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md))
+and adds the surface side in `mtpnxk_surface.lua` 0.2.0:
+
+- `bank=<quickey>/<page>.<first>-<last>` provisions the owned Quickey bank from the plugin argument only
+  (`authorized = true` is the operator's argument, never a surface request); codes default to the nine with
+  KB-10 evidence (`bankcodes=hardkeys` for all 94). The record is kept across `stop` and adopted at the next
+  start; `bank status | verify | teardown` are control calls on the running instance.
+- `input=mixed` attaches `mixedBackend({ quickey = quickeyBackend(inst), keyboard = keyboardBackend(deps) })`
+  with the policy `{ default = "quickkey", keys = <every key without KB-10 hold evidence -> shortcut> }`; the
+  table is explicit (`NXK_QUICKKEY_HOLD`: NUM1, NUM5, THRU, PLEASE, CLEAR, STORE) because the surface holds every
+  key, so a tap-only code (OOPS) is not a Quickey key. `input=quickey` is `{ default = "quickkey" }` alone.
+  `route=<key>:<method>` overrides single keys; the module validates every method against the attached
+  backend (`policy-unavailable`) and the surface refuses the start when an override resolves to no usable
+  route. Without a bank the Quickey modes report the KB-12 requirement and press nothing.
+- The start and `status` report the method, effective route and dispatching part per key (`describeRoute`);
+  the welcome carries `backend`. `recover` attaches the part the kept records name (keyboard, quickey or
+  mixed), as the bridge does.
+- A stale run left by `ReloadAllPlugins` (state marked running, loop dead, socket still bound) is taken over
+  by the next start instead of blocking it (found during this run).
+- 0.2.1 (KB-16 review): a temporary shortcut-mode change that `dispose()` could not restore (KB-14: a dependent
+  key still held, the restore delay not elapsed, or the profile/mode changed meanwhile) is no longer dropped at
+  stop, Cleanup or quarantine export. The record is kept in `state.modeRecord`, reported by `status`, adopted at
+  the next start as an unresolved restoration (every press refused `busy` until it is restored) and restored by
+  `recover` on the original profile, exactly as the bridge does; harness: stop with a pending restoration,
+  restart, refusal, status, recover, presses accepted again.
+
+Harness: 143 checks (36 new: parsing, no-bank refusal, provisioning, the per-key report, Quickey executor
+press/Unpress, both unqualified-mix directions, bank status/teardown refusals, record kept and adopted,
+an unresolved Quickey record recovered through the quickey part, Quickeys-only refusals, policy refusals,
+inert overrides, teardown and the no-fallback afterwards, stale-run takeover). The KB-14 mode operation
+changed one KB-07 check: a key whose shortcut row is off is pressed with a temporary enable and restored.
+`sh tools/ma3/test/e2e.sh` passes unchanged on the keyboard path.
+
+**Verified live** (macOS, onPC 2.5.1.0, show `mcp-test-disposable`, the hardware service paired throughout):
+[docs/probes/kb-15-surface-macos-2.5.1.md](docs/probes/kb-15-surface-macos-2.5.1.md). Not established: a
+second display, show save/reload with the bank, Windows/Linux, LED behaviour seen by an operator, the
+press-to-effect figure for Quickey taps (the bench's tap length dominates it, see the record).
+
+## KB-16 — Qualify existing hardware protocols (surface half, 2026-10-10)
+
+The Rust service gains `src/mtouch/`: control tables, report decoder and output encoders for the Martin
+M-Touch (`11be:f808`) and M-Play (`11be:f80c`), ported from the MTouchPlay repository at `e48eb2c` and
+regression-tested against its capture logs (17 tests; `cargo test` now runs 36), plus the operator commands
+`mtouch-listen` and `mtouch-led-test`. What was reused, what was not re-verified, the regression table and
+the live qualification procedure (recorded into `docs/probes/kb-16-hardware-<device>-<os>.md`) are in
+[docs/mtouch-protocol-reuse.md](docs/mtouch-protocol-reuse.md). Both devices were qualified live on macOS the same day
+([M-Touch](docs/probes/kb-16-hardware-mtouch-macos.md), [M-Play](docs/probes/kb-16-hardware-mplay-macos.md):
+every control, report type and output write, idle polls, queued reports at open, unplug and replug), and nothing is wired
+into the link (`run`/`sim`/`bench` remain NX-K only; integration is KB-20+). Hardware protocol
+qualification does not establish grandMA3 behaviour: the console-semantics half of KB-16 lives in
+bdstark/GrandMA3MCP `ENCODERS.md`.
