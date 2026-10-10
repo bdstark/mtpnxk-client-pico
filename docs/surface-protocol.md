@@ -264,7 +264,7 @@ every check reaches `hardkeys`/`feedback`/`control`.
 ### 3a. Continuous-control events (`ctl`, KB-18)
 
 ```
-service → plugin   ctl { t:"ctl", sid, seq, ev, k, dev, c, es, cg?, gs?, tgt, dx? | v? | d?, fine? }
+service → plugin   ctl { t:"ctl", sid, seq, ev, k, dev, c, es, cg?, gs?, tgt, dx? | v? | d?, fine?, tk? }
 plugin  → service  ack { t:"ack", sid, seq, ev, ok, code?, why?, cg?, lost?, coalesced?, superseded?, queued?, boundary?, noop?, dup? }
 ```
 
@@ -276,7 +276,8 @@ plugin  → service  ack { t:"ack", sid, seq, ev, ok, code?, why?, cg?, lost?, c
 | `cg` | the binding generation the event was produced against: the `cg` of the last known `context` message. Required for motion and downs; absent on a release. The plugin refuses a stale one (`stale-generation`, the current `cg` in the ack) and anything while it claims no generation (`binding-unknown`) |
 | `gs` | the gesture id: new on every touch down and button, and for untouched rotaries after 300 ms idle. The plugin coalesces deltas only within one gesture |
 | `tgt` | `{slot: n}` (encoder slot n of the bound display) or `{ex: n, el: fader\|key\|encoder}` (an element of a bound executor); the NX-K rotaries 1–4 are slots `--rotary-slots`..+3 (1–4 by default; `2` reaches slot 5, KB-19) |
-| `fine` | the surface's explicit fine modifier (Bank held on the NX-K); on the console backend it divides the calibrated click by 10 (KB-19) |
+| `fine` | the surface's explicit fine modifier (Bank held on the NX-K, or an M-Touch strip's own key held); on the console backend it divides the calibrated click by 10 (KB-19) |
+| `tk` | KB-20, on `abs` only: 1 when the position is a deliberate **takeover** (the strip's key was held at touch-down); the vendored module then places it on a slot whose fixtures hold different values instead of refusing `mixed-values`. `bad-tk` on any other kind or value |
 
 The service (`src/link.rs`) queues motion and merges it before sending: deltas of one control, generation and
 gesture add up; a newer position replaces the queued one only for an encoder slot or an executor whose fader
@@ -301,9 +302,12 @@ services every tick and applies at most 4 intents through the backend: `control=
 on the console) or, since KB-19 (plugin 0.5.0, control 0.2.0), `control=console`, the vendored **console adjustment
 backend**: a relative event on an attribute slot becomes `Attribute "<name>" At +/- <detents x step>` for the selection,
 one detent being one console encoder click (Percent/PercentFine readouts 1 at Coarse, Physical readouts the attribute's
-range / 120 in physical units from the context's `physicalRange`, Fine a tenth, `fine` a tenth again); pushes, touches,
-positions and executor elements are acknowledged `unsupported` at admission (`docs/modules.md` there, "Console
-adjustment backend"). A session's lease lapse, `bye`, silence or the
+range / 120 in physical units from the context's `physicalRange`, Fine a tenth, `fine` a tenth again); since KB-20 (plugin
+0.6.0, control 0.3.0) a strip **touch** on a slot is a hold that backend serves (busy, owned, nothing issued), a strip
+**position** is `Attribute "<name>" At <value>` over the verified travel (Percent 0..100, Physical From..To in physical
+units; a mixed physical range is refused) and is refused `mixed-values` while the selection's values disagree unless `tk: 1`;
+pushes and executor elements are acknowledged `unsupported` at admission (`docs/modules.md` there, "Console
+adjustment backend", "Parameter strips on the console backend"). A session's lease lapse, `bye`, silence or the
 plugin's stop ends its gestures through the backend and drops queued motion; a release the backend raised on is
 kept across restarts for `Plugin "mtpnxk_surface" "recover"`. The plugin's and the bridge's control instances do not
 arbitrate with each other (section 6 applies).
@@ -393,6 +397,7 @@ user profile's shortcut table; unresolved keys are reported in
 | `Undo` | `OOPS` | shortcut `Backspace` |
 | `Update`, `Edit`, `Copy`, `Move`, `Delete`, `Load`, `Cue`, `Group`, `Macro`, `Fade`, `Delay`, `HighLight`, `Preview`, `Next`, `Last`, `Menu`, `Snap Shot`, `Thru`, `Full`, `@`, `+`, `-`, `.`, `/`, `Back` | the `Enums.VirtualKeyCode` name in the plugin's table (`UPDATE`, `EDIT`, … `PREV` for Last, `SNAPSHOT`, `THRU`, `FULL`, `AT`, `PLUS`, `MINUS`, `DOT`, `SLASH`, `BACKSPACE`) | **unverified**: resolved through the shortcut table if the profile maps them; otherwise reported unsupported. The names are checked against the console's enum at start; a wrong name is reported, never guessed. |
 | `Rotary1`–`Rotary4` (turn and press) | encoder slots 1–4 of the bound display (`ctl` events, section 3a) | since KB-18 admitted by the vendored control module against the binding generation; the fake backend records them and nothing moves on the console until KB-19 |
+| M-Touch `Strip1`–`Strip4` (the base-channel faders, `dev: "mtouch"`) | encoder slots `--strip-slots`..+3 (`ctl` events: `touch` down/up around the gesture, `rel` detents from the drag, or `abs` positions in absolute mode) | since KB-20; the strip's own key is its `fine` (relative) or takeover (absolute) modifier and is never a console key |
 | `Bank`, `Swap Prog`, `Link` | none | Bank is the `fine` modifier of the rotaries (held) and otherwise unsupported as a key; Link is the link LED; the pre-KB-18 `wheel` message is still answered `unsupported` |
 
 Hardkeys 0.5.0 resolves any `Enums.VirtualKeyCode` name through the shortcut

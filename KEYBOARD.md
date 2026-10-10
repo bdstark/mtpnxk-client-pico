@@ -351,3 +351,63 @@ programmer value read back through the MCP bridge).
 **Not verified live:** the physical NX-K rotaries (the `sim` path exercises the same service code from the decoder
 onward; the operator qualification with the device in hand is KB-24's), two surfaces on one slot, Windows/Linux hosts,
 M-Touch strips (KB-20).
+
+## KB-20 — M-Touch parameter strips act as encoders (surface half, 2026-10-10)
+
+The console half is in the MCP repository (`gma3_mcp_control` 0.3.0: a strip **touch** on an attribute slot is a hold
+the console backend serves, a strip **position** is `Attribute "<name>" At <value>` over the verified travel, mixed
+values are refused unless the event says takeover; bridge 0.16.0; branch `feat/kb20-strip-adjust`, live record
+`docs/probes/kb-20-strips-macos-2.5.1.md` there). This repository vendors the 0.10.0 / 0.4.0 / 0.3.0 set unchanged from
+`01e1561` ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md)) and owns the gesture conversion (`service/src/strips.rs`):
+
+- **Which strips:** the M-Touch's four right-hand base-channel faders (`VALUE BASE CHANNEL 1..4`, 0x6112/0x6122/0x6132/
+  0x6142: 8-bit position 0..255 bottom to top, a `touch` flag, a lift report with the resting value; KB-16 record) are
+  `Strip1..Strip4`, encoder slots `--strip-slots`..+3 of the bound display (1-4 by default, `2` reaches the fifth pool
+  slot, as `--rotary-slots`). The ten playback strips are not parameters (KB-21/22); the pressure keys are never input.
+- **Relative touch-drag by default (`--strips relative`):** the first report with the finger down **anchors** the strip
+  and sends the touch down (no jump to the touched position); every later report moves the slot by `(counts moved) x
+  120 / 255` detents with the fraction carried exactly (integer arithmetic: a full stroke is exactly 120 detents, the
+  five encoder turns of one attribute range; `--strip-travel` changes it); the lift sends the touch up and nothing
+  else. One count of jitter (0.47 detents) never emits on its own. Lifting and retouching re-anchors: repeated travel
+  across a large range is lift, touch, drag again.
+- **Direction, sensitivity, fine as the rotaries:** up is positive; the detents reach the console as the same `rel`
+  events the NX-K produces (one detent = one console click, KB-19 calibration); `fine` is the NX-K's Bank held **or**
+  the strip's own capacitive key (`BASE CHANNEL n`, 0x61n1) held.
+- **Binding changes while touched:** a moved context generation marks the touch rebound: its motion is dropped in the
+  service until the lift (the plugin would refuse it `gesture-rebound` anyway); the next touch is a fresh gesture against
+  the new binding. `--verbose` prints "lift and touch again".
+- **Missed touch-up, reconnect:** a touch longer than 30 s without a lift report is ended locally (the console's own
+  `maxGestureMs` is the same bound); the next report with the finger down re-anchors. The M-Touch is optional and
+  hot-pluggable in `run` (`--mtouch auto|off`): opened when present, retried every 2 s while absent, and when it goes
+  away every touched strip is released; reports queued on the device before the open are discarded, never used to seed
+  a touch. The keypad going away releases the strips before the devices are reopened.
+- **Absolute mode (`--strips absolute`, an explicit choice):** positions (`abs`, 0..1 of the travel) go out only after
+  **pickup** (the strip crossed, or landed within 0.02 of, the slot's last known value from the plugin's context: `abs`
+  as a percentage of the range, the same for every readout) or an **explicit takeover** (the strip's key held at
+  touch-down, which marks the events `tk: 1` so the console backend places the value on a mixed selection). A slot whose
+  value is unknown, empty or mixed cannot be picked up: the strip waits (`waiting_pickup` in the summary) until a
+  takeover. Reconnects, page changes and touch-down therefore never jump; a page change while touched is a rebound. The
+  console backend places the value over the verified travel only (Percent 0..100, Physical From..To) and refuses a
+  mixed physical range. The context's slot values refresh on a generation change and at least once a second, so pickup
+  is against the binding's last read, not a live value (documented limitation).
+- **Mixed values stay mixed:** in relative mode nothing collapses them; in absolute mode the plugin's vendored module
+  refuses a position on such a slot `mixed-values` unless `tk: 1` was sent, which only the strip's key produces.
+- **M-Play:** its faders are playback faders (KB-21/22); none is mapped as a parameter strip here.
+- **`mtpnxk_surface.lua` 0.6.0:** carries `tk` (a position's takeover flag; `bad-tk` elsewhere) to the vendored module;
+  the console-backend log line names the strips.
+- **Rust service** (`cargo test` 55, nine new): `strips.rs` (anchor, carried fraction, full stroke, jitter, fine from
+  Bank or the strip key, the slot window, rebound, missed lift, disconnect, off, absolute pickup/takeover), `sim`
+  strip steps (`strip<n>:t<v>|m<v>|lift|l<v>`, `skey<n>:down|up|tap`) and `poll_strips`, `tk` on the wire, the
+  `--strips/--strip-slots/--strip-travel/--mtouch` flags and a `strips:` summary line.
+
+Harness: `lua tools/ma3/test/surface_plugin_test.lua` 202 checks (7 new: a strip touch as a hold, the drag inside it
+`At + 3`, a position `At 25`, a Physical position `At -180`, `tk` carried, bad `tk` rejected, the lift as a boundary);
+`cargo test` 55; `sh tools/ma3/test/e2e.sh` adds the strip scenario (touch, drag and lift refused honestly by the stub
+console without an encoder bar, the lift a noop).
+
+**Verified live in this repository:** pending: [docs/probes/kb-20-surface-macos-2.5.1.md](docs/probes/kb-20-surface-macos-2.5.1.md)
+records the planned `sim` strip run against onPC with `control=console` (the same path as KB-19) once the console is up.
+
+**Not verified live:** the physical M-Touch strips through `run` (the `sim` path enters the service after the decoder;
+the hardware qualification with the operator at the surface is KB-24's), absolute-mode pickup against a live programmer
+value, two surfaces on one slot, Windows/Linux hosts.

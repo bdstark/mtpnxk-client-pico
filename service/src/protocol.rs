@@ -52,6 +52,9 @@ pub enum ToPlugin<'a> {
         d: Option<u8>,
         #[serde(skip_serializing_if = "Option::is_none")]
         fine: Option<u8>,
+        /// KB-20: 1 on a position the surface marks as a deliberate takeover (strip key held at touch-down).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tk: Option<u8>,
     },
     Hb {
         sid: &'a str,
@@ -293,10 +296,10 @@ mod tests {
         let k = ToPlugin::Key { sid: "s", seq: 2, ev: 7, k: "Record", d: 1 };
         let text = serde_json::to_string(&k).unwrap();
         assert!(text.contains(r#""t":"key""#) && text.contains(r#""ev":7"#));
-        let c = ToPlugin::Ctl { sid: "s", seq: 3, ev: 8, k: "rel", dev: "nxk", c: "Rotary1", es: 1, cg: Some(4), gs: Some(2), tgt: CtlTarget::Slot { slot: 1 }, dx: Some(-3), v: None, d: None, fine: Some(1) };
+        let c = ToPlugin::Ctl { sid: "s", seq: 3, ev: 8, k: "rel", dev: "nxk", c: "Rotary1", es: 1, cg: Some(4), gs: Some(2), tgt: CtlTarget::Slot { slot: 1 }, dx: Some(-3), v: None, d: None, fine: Some(1), tk: None };
         let text = serde_json::to_string(&c).unwrap();
         assert!(text.contains(r#""t":"ctl""#) && text.contains(r#""tgt":{"slot":1}"#) && text.contains(r#""dx":-3"#) && !text.contains(r#""v""#), "{text}");
-        let t = ToPlugin::Ctl { sid: "s", seq: 4, ev: 9, k: "touch", dev: "mtouch", c: "Strip1", es: 2, cg: None, gs: Some(3), tgt: CtlTarget::Executor { ex: 201, el: "fader" }, dx: None, v: None, d: Some(0), fine: None };
+        let t = ToPlugin::Ctl { sid: "s", seq: 4, ev: 9, k: "touch", dev: "mtouch", c: "Strip1", es: 2, cg: None, gs: Some(3), tgt: CtlTarget::Executor { ex: 201, el: "fader" }, dx: None, v: None, d: Some(0), fine: None, tk: None };
         let text = serde_json::to_string(&t).unwrap();
         assert!(text.contains(r#""tgt":{"ex":201,"el":"fader"}"#) && text.contains(r#""d":0"#) && !text.contains(r#""cg""#), "{text}");
         let a: FromPlugin = serde_json::from_str(r#"{"t":"ack","sid":"s","seq":5,"ev":8,"ok":1,"lost":2,"coalesced":1}"#).unwrap();

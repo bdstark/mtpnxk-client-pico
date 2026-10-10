@@ -58,6 +58,13 @@ local my_handle     = select(4, ...)
 local socket = require("socket")
 local json   = require("json")
 
+-- KB-20 (0.6.0): the M-Touch parameter strips reach the console through the same `ctl` events: a strip
+-- touch on a slot is served by the vendored console backend (0.3.0) as a hold that moves nothing, the drag
+-- inside it as the KB-19 adjustment, a position (`abs`, optional `tk` = takeover) as
+-- Attribute "<name>" At <value> over the verified travel; a position on a slot whose fixtures hold
+-- different values is refused `mixed-values` unless the surface sent `tk: 1`. The gesture conversion
+-- (anchoring, sensitivity, pickup) is the service's; this plugin maps the packet and acknowledges the
+-- module's verdict as before.
 -- KB-19 (0.5.0): `control=console` attaches the vendored module's console adjustment backend: a rotary
 -- detent on slot n becomes the selection-scoped  Attribute "<name>" At +/- <detents x step>  for whatever
 -- attribute the bound display's slot n holds (name, layer, resolution, readout, channel function and
@@ -67,7 +74,7 @@ local json   = require("json")
 -- `unsupported` by that backend at admission (nothing pressed; KB-20/21/22). The console semantics are
 -- the MCP repository's (docs/modules.md there, "Console adjustment backend"); this plugin only chooses
 -- the backend.
-local VERSION   = "0.5.0"
+local VERSION   = "0.6.0"
 local PROTOCOL  = 1
 local MAGIC     = "MTX1"
 local DEFAULTS = {
@@ -624,7 +631,7 @@ local function handleWheel(s, obj, now)
   return nil
 end
 
--- KB-18: a continuous-control event. {t:"ctl", ev, k: rel|abs|touch|btn, dev, c, es, cg?, gs?, tgt, dx|v|d, fine?}.
+-- KB-18: a continuous-control event. {t:"ctl", ev, k: rel|abs|touch|btn, dev, c, es, cg?, gs?, tgt, dx|v|d, fine?, tk?}.
 -- Validation first (a malformed packet is rejected, not acknowledged); event-id deduplication as for keys;
 -- for touches and buttons the per-control event-id order (a stale press after its release never acts;
 -- motion is ordered by the module's per-device sequence `es`); then the vendored module admits it:
@@ -643,6 +650,7 @@ local function handleCtl(s, obj, now)
   if obj.cg ~= nil and (type(obj.cg) ~= "number" or obj.cg ~= math.floor(obj.cg)) then return "bad-cg" end
   if obj.gs ~= nil and (type(obj.gs) ~= "number" or obj.gs ~= math.floor(obj.gs) or obj.gs < 0) then return "bad-gs" end
   if obj.fine ~= nil and obj.fine ~= 0 and obj.fine ~= 1 then return "bad-fine" end
+  if obj.tk ~= nil and (obj.k ~= "abs" or (obj.tk ~= 0 and obj.tk ~= 1)) then return "bad-tk" end  -- KB-20: takeover is a position's flag
   local t = obj.tgt
   if type(t) ~= "table" then return "bad-target" end
   local target
@@ -660,6 +668,7 @@ local function handleCtl(s, obj, now)
   elseif kind == "absolute" then
     if type(obj.v) ~= "number" or obj.v < 0 or obj.v > 1 then return "bad-v" end
     event.value = obj.v
+    if obj.tk == 1 then event.takeover = true end
   else
     if obj.d ~= 0 and obj.d ~= 1 then return "bad-d" end
     event.down = obj.d == 1
@@ -1417,7 +1426,7 @@ enableControl = function(mode)
   if not rec or not rec.instance then logerr("control %s requested but the control module is not loaded (%s)", mode, tostring(rec and rec.error)); state.controlMode = "off"; return false end
   local ok, err = pcall(function()
     if mode == "console" then
-      if type(rec.module.consoleBackend) ~= "function" then error("the vendored control module " .. tostring(rec.version) .. " has no console backend (0.2.0 or newer is needed)", 0) end
+      if type(rec.module.consoleBackend) ~= "function" then error("the vendored control module " .. tostring(rec.version) .. " has no console backend (0.2.0 or newer is needed; 0.3.0 serves the strips)", 0) end
       rec.instance:enableInput(rec.module.consoleBackend(rec.module.consoleDeps(_G)))
     else
       rec.instance:enableInput(rec.module.fakeBackend())
@@ -1432,7 +1441,7 @@ enableControl = function(mode)
   end
   state.controlEnabled = true
   if mode == "console" then
-    log("control enabled on the console backend: a rotary detent on slot n is applied as Attribute \"<name>\" At +/- <detents x step> for the selection (KB-19); pushes are refused unsupported")
+    log("control enabled on the console backend: a rotary detent or strip drag on slot n is applied as Attribute \"<name>\" At +/- <detents x step> for the selection (KB-19), a strip touch holds the slot and a strip position is Attribute \"<name>\" At <value> (KB-20); pushes are refused unsupported")
   else
     log("control enabled on the fake backend (intents recorded; nothing moves on the console)")
   end
