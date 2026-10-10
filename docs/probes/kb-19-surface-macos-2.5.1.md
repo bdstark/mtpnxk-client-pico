@@ -7,7 +7,8 @@ vendored set 0.10.0 / 0.4.0 / 0.2.0 from GrandMA3MCP `45af5fb`, the release serv
 programmer back through its `cmd` and `lua` ops; its own control instance stayed idle). Input stayed on the fake
 backend (no key injection); only the control path was exercised. Re-run unchanged after the PR #23 review re-vendor
 (`45af5fb`: attribute-editing context required, complete physical ranges only, calibration in the digest): same
-script, same value 3.300005, same refusal of the push.
+script, same value 3.300005, same refusal of the push; and once more after review round 2 (`45af5fb`, a failed channel
+discovery is incomplete coverage): same result.
 
 ## Procedure
 
