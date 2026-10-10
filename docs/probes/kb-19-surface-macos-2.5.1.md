@@ -2,11 +2,11 @@
 
 Evidence for [KEYBOARD.md](../../KEYBOARD.md) "KB-19". Run on 2026-10-10 with `mtpnxk_surface` 0.5.0 (plugin slot 2,
 imported with Macro 123, started with Macro 121: `Plugin "mtpnxk_surface" "key=... input=fake control=console"`), the
-vendored set 0.10.0 / 0.4.0 / 0.2.0 from GrandMA3MCP `e142672`, the release service at this commit, show
+vendored set 0.10.0 / 0.4.0 / 0.2.0 from GrandMA3MCP `45af5fb`, the release service at this commit, show
 `mcp-test-disposable`, the MCP bridge 0.15.0 running alongside (used only to select the fixture and read the
 programmer back through its `cmd` and `lua` ops; its own control instance stayed idle). Input stayed on the fake
 backend (no key injection); only the control path was exercised. Re-run unchanged after the PR #23 review re-vendor
-(`e142672`: attribute-editing context required, complete physical ranges only, calibration in the digest): same
+(`45af5fb`: attribute-editing context required, complete physical ranges only, calibration in the digest): same
 script, same value 3.300005, same refusal of the push.
 
 ## Procedure
