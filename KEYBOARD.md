@@ -229,3 +229,31 @@ every control, report type and output write, idle polls, queued reports at open,
 into the link (`run`/`sim`/`bench` remain NX-K only; integration is KB-20+). Hardware protocol
 qualification does not establish grandMA3 behaviour: the console-semantics half of KB-16 lives in
 bdstark/GrandMA3MCP `ENCODERS.md`.
+
+## KB-17 — Shared control-context and binding snapshots (surface half, 2026-10-10)
+
+The module half is in the MCP repository (`gma3_mcp_feedback` 0.3.0, bridge 0.13.0, branch `feat/kb17-context-snapshot`,
+live record `docs/probes/kb-17-context-macos-2.5.1.md` there, 31/31). This repository vendors the 0.10.0/0.3.0 pair unchanged
+([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md)) and adds the surface side in `mtpnxk_surface.lua` 0.3.0:
+
+- the context items (data pool, executor page, encoder bank and slots of the configured display, one target per
+  `execs=` executor) are watched next to the state items, so the loop's bounded reads keep them observed;
+- every tick builds the module's cached `contextSnapshot()` and sends it as a `context` message
+  ([docs/surface-protocol.md](docs/surface-protocol.md) section 1a) when its binding generation, `known` flag or epoch
+  moved, and with the full-state cadence otherwise. No grandMA3 semantics are reconstructed here: unavailable parts
+  carry the module's reason, and while a part is unobserved `known = 0` and no generation is claimed;
+- the welcome carries `context: 1`; `status` counts `contexts`.
+- the Rust service parses the message (`FromPlugin::Context`), keeps the last one as data (`Link.context`), counts
+  received contexts and generation moves and logs each move with bank/page/context and the slot/executor counts.
+  The context is dropped on link down, re-pairing and every new welcome, and `Link::context_view(now)` presents one
+  only while paired with the link up, received in this pairing within `state_stale` and marked known by the plugin
+  (`cargo test`: 38, two new).
+
+Harness: 159 checks (8 new: the watch list, the message after the parts are observed with the missing encoder bar
+explicit, cadence, an executor-page change moving the generation in the frame it is observed, back again, a show
+change withdrawing the generation until every part is observed, resumption in the new epoch). `sh tools/ma3/test/e2e.sh`
+unchanged on the keyboard path.
+
+**Not verified live in this repository:** the surface plugin against onPC with the 0.3.0 pair (the MCP repository's
+probe exercised the same module through the bridge); an encoder bar is only present on display 1 there, so the
+plugin's default `display=1` is the one that answers. Wiring the context into encoder bindings is KB-18/KB-19.

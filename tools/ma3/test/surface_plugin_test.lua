@@ -169,8 +169,8 @@ check("bad option refused", select(2, state._parseArgument("key=x bogus")) ~= ni
 check("start without a key is refused", reset("input=fake") == false and findLog("pairing key is required"))
 check("start with a short key is refused", reset("key=abcd input=fake") == false)
 check("start with a key succeeds on the fake backend", reset() == true and state.inputEnabled == true and state.inputMode == "fake" and state.gen:match("^%d+%-%x%x%x%x%x%x%x%x$"), J({ state.inputMode, state.gen }))
-check("modules loaded (vendored versions)", state.modules.hardkeys.version == "0.10.0" and state.modules.feedback.version == "0.2.0", J(state.moduleVersions))
-check("feedback watch list bounded (9 items for the NX-K)", state.modules.feedback.instance:status().watched == 9)
+check("modules loaded (vendored versions)", state.modules.hardkeys.version == "0.10.0" and state.modules.feedback.version == "0.3.0", J(state.moduleVersions))
+check("feedback watch list bounded (9 state items + 3 more context items for the NX-K; page is shared)", state.modules.feedback.instance:status().watched == 12)
 
 -------------------------------------------------------------------------------
 -- Pairing: hello / welcome, authentication, replay
@@ -427,6 +427,53 @@ check("an uncertain identity renders every item unknown", allUnknown ~= nil, J(a
 Root = oldRoot
 for _ = 1, 30 do tickAlive(0.05); drain() end
 check("identity readable again (same show): items return", state._collectState(clock.t).highlight == 1)
+
+-------------------------------------------------------------------------------
+-- KB-17: control context carried as a `context` message, built from the loop's observations
+-------------------------------------------------------------------------------
+check("welcome announced the context capability", welcome and welcome.context == 1, J(welcome and welcome.context))
+local ctx
+for _ = 1, 12 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do ctx = p end; if ctx and ctx.known == 1 then break end end
+local fbEpoch = state.modules.feedback.instance:epoch()
+check("a context message follows once every part is observed; no encoder bar on this console is explicit, not a substitute", ctx and ctx.known == 1 and type(ctx.cg) == "number" and ctx.gen == state.gen and ctx.epoch == fbEpoch and ctx.display == 1 and ctx.pool == "Default" and ctx.page == 3 and ctx.enc.why and ctx.enc.why:find("no encoder bar") and ctx.slotsWhy and #ctx.ex == 0, J(ctx))
+local G = ctx and ctx.cg or 0
+local c0 = state._collectContext(clock.t)
+check("the plugin reconstructs nothing: the message is the vendored snapshot's content", c0 and c0.t == "context" and c0.enc.why == ctx.enc.why and c0.cg == G)
+local before = state.counters.contexts
+for _ = 1, 25 do tickAlive(0.05) end
+drain()
+check("an unchanged context is repeated with the full-state cadence only", state.counters.contexts - before >= 1 and state.counters.contexts - before <= 2, state.counters.contexts - before)
+console.page = "4"
+local moved
+for _ = 1, 12 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do if p.cg == G + 1 then moved = p end end; if moved then break end end
+check("an executor-page change moves the binding generation and is sent in the frame it is observed", moved and moved.page == 4 and moved.known == 1, J(moved))
+console.page = "3"
+for _ = 1, 12 do tickAlive(0.05); drain() end
+check("back on the original page: a new generation again (meaning changed twice)", state._collectContext(clock.t).cg == G + 2)
+console.showFile = "show-c"
+local unknownCtx
+for _ = 1, 30 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do if p.epoch == fbEpoch + 1 and p.known == 0 then unknownCtx = p end end; if unknownCtx then break end end
+check("after a show change no generation is claimed until every part is observed again", unknownCtx and unknownCtx.cg == nil and unknownCtx.enc.why:find("not observed"), J(unknownCtx))
+local back
+for _ = 1, 30 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do if p.epoch == fbEpoch + 1 and p.known == 1 then back = p end end; if back then break end end
+check("the generation resumes in the new epoch", back and back.cg == G + 3, J(back))
+-- Review: a snapshot whose selection identity is incomplete is not known, with the module's reason carried.
+do
+  local inst = state.modules.feedback.instance
+  local real = inst.contextSnapshot
+  inst.contextSnapshot = function(self, spec, now, opts)
+    local snap = real(self, spec, now, opts)
+    snap.generation, snap.generationUnknown, snap.generationNote = nil, true, "no generation: the selection identity is incomplete (selection identity bounded to 512 of 600 fixtures)"
+    snap.slots = { available = true, value = { bank = {}, page = {}, selection = { count = 600, scanned = 8, identityComplete = false }, slots = {} } }
+    return snap
+  end
+  local m = state._collectContext(clock.t)
+  check("an incomplete selection identity is propagated as known=0 with the reason and selIncomplete", m.known == 0 and m.cg == nil and m.why:find("selection identity is incomplete") and m.selIncomplete == 1 and m.sel == 600, J(m))
+  local sent
+  for _ = 1, 3 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do if p.known == 0 then sent = p end end; if sent then break end end
+  check("the unknown context is sent in the frame it changes", sent and sent.why:find("incomplete"), J(sent))
+  inst.contextSnapshot = real
+end
 
 -------------------------------------------------------------------------------
 -- Keyboard backend and bench mode

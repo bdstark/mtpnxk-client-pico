@@ -8,10 +8,10 @@ key routes, ownership and leases, read-only state readers. The surface plugin
 
 | Component | Version | Module API | Copied from |
 | --- | --- | --- | --- |
-| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `3960334` (branch `feat/kb15-mixed-backend`, pinned there as `e03615d`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
-| `gma3_mcp_feedback` | 0.2.0 | 1 | `c18559a` (unchanged through `3960334`); sha256 `349bb2ed1cc88bdbaf197aa20e957811df44306133c04652663da01a585d2cf9` |
+| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `c8dbb3a` (branch `feat/kb17-context-snapshot`; unchanged since `3960334`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
+| `gma3_mcp_feedback` | 0.3.0 | 1 | `c8dbb3a` (KB-17: control-context readers, `contextSnapshot()`/`watchContext()` with the binding generation incl. the whole selection identity after a validated traversal and every configured function); sha256 `7949a11282b97cdbf71cf596957f13231807b217c40c315e10623856053938c0` |
 
-Previous pin: hardkeys 0.5.0 `d73a8e10…` (PR #12, `6e0d9c1`), used by the KB-07/KB-08 records.
+Previous pins: hardkeys 0.10.0 / feedback 0.2.0 at `3960334` (KB-15); hardkeys 0.5.0 `d73a8e10…` (PR #12, `6e0d9c1`), used by the KB-07/KB-08 records.
 
 Upstream's `plugin/modules.lock.json` carries the same hashes. Check them before
 packaging (`shasum -a 256 tools/ma3/gma3_mcp_*.lua`): the version strings alone do

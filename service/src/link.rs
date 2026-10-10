@@ -60,6 +60,9 @@ pub struct Stats {
     pub superseded: u64,
     pub states: u64,
     pub deltas_ignored: u64,
+    /// KB-17 context messages received, and how many moved the binding generation.
+    pub contexts: u64,
+    pub context_generations: u64,
     pub link_downs: u64,
     pub no_session: u64,
 }
@@ -108,6 +111,18 @@ pub struct ConsoleState {
     pub last_state_at: f64,
 }
 
+/// The control context as last received (KB-17): the plugin's binding generation and the message body.
+/// `known` false means the plugin had not observed every part; `generation` is then absent.
+#[derive(Debug, Clone, Default)]
+pub struct ConsoleContext {
+    pub plugin_generation: String,
+    pub epoch: u64,
+    pub known: bool,
+    pub generation: Option<u64>,
+    pub body: BTreeMap<String, Value>,
+    pub received_at: f64,
+}
+
 /// What a renderer sees: the items, or nothing when they must be shown as unknown.
 #[derive(Debug, Clone)]
 pub struct ConsoleView<'a> {
@@ -137,6 +152,8 @@ pub struct Link {
     outgoing: Vec<Vec<u8>>,
     pub stats: Stats,
     console: ConsoleState,
+    /// KB-17: the last control context, kept as data; `None` until one arrived in this pairing.
+    pub context: Option<ConsoleContext>,
     last_rx: f64,
     pub link_up: bool,
     pub plugin_held: Vec<String>,
@@ -165,6 +182,7 @@ impl Link {
             outgoing: Vec::new(),
             stats: Stats::default(),
             console: ConsoleState::default(),
+            context: None,
             last_rx: now,
             link_up: false,
             plugin_held: Vec::new(),
@@ -199,6 +217,17 @@ impl Link {
         let paired = self.session().is_some();
         let fresh = paired && self.link_up && self.console.full_seen && now - self.console.last_state_at <= self.cfg.state_stale;
         ConsoleView { fresh, paired, link_up: self.link_up, items: if fresh { Some(&self.console.items) } else { None } }
+    }
+
+    /// The control context (KB-17) as something a consumer may act on: only while paired with the link up,
+    /// only a context received in this pairing within `state_stale`, and only one the plugin marked known.
+    /// Anything else is `None`: a stale or previous-pairing context is never presented as current.
+    pub fn context_view(&self, now: f64) -> Option<&ConsoleContext> {
+        let fresh = self.session().is_some() && self.link_up;
+        match &self.context {
+            Some(c) if fresh && c.known && now - c.received_at <= self.cfg.state_stale => Some(c),
+            _ => None,
+        }
     }
 
     pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
@@ -317,11 +346,13 @@ impl Link {
             self.pending.clear();
             self.link_up = false;
             self.console.full_seen = false;
+            self.context = None;
             self.send_hello(now);
             return;
         }
         if silent > self.cfg.watchdog && self.link_up {
             self.link_up = false;
+            self.context = None;
             self.stats.link_downs += 1;
             self.note(format!("link down: no plugin packet for {:.1} s", silent));
         }
@@ -394,6 +425,8 @@ impl Link {
                 self.phase = Phase::Paired(Session { sid, out_seq: 0, in_seq: seq, lease_ms: lease, hb_ms: hb, plugin_gen: pgen.clone(), keys, modules, input, next_hb: now });
                 self.pending.clear();
                 self.console = ConsoleState { generation: pgen, epoch: epoch.unwrap_or(0), items: BTreeMap::new(), full_seen: false, last_state_at: now };
+                // KB-17 review: a new pairing is a new plugin run; the previous context (and its generation) is gone.
+                self.context = None;
                 self.last_rx = now;
                 self.link_up = true;
             }
@@ -405,6 +438,7 @@ impl Link {
                         self.note("plugin knows no session for our sid (plugin restarted or forgot us): pairing again".into());
                         self.pending.clear();
                         self.link_up = false;
+                        self.context = None;
                         self.console.full_seen = false;
                         self.send_hello(now);
                     }
@@ -465,6 +499,35 @@ impl Link {
                     self.stats.deltas_ignored += 1;
                     self.console.full_seen = false;
                 }
+            }
+            FromPlugin::Context { sid, seq, generation: pgen, epoch, known, cg, rest } => {
+                if !self.admit(&sid, seq, now) {
+                    return;
+                }
+                self.stats.contexts += 1;
+                let known = known == 1;
+                let moved = match &self.context {
+                    Some(prev) => prev.plugin_generation != pgen || prev.epoch != epoch || prev.known != known || prev.generation != cg,
+                    None => true,
+                };
+                if moved {
+                    self.stats.context_generations += 1;
+                    if known {
+                        let enc = rest.get("enc").cloned().unwrap_or(Value::Null);
+                        let describe = |v: &Value, k: &str| v.get(k).map(|x| x.to_string()).unwrap_or_else(|| "?".into());
+                        self.note(format!(
+                            "context generation {} (epoch {}): bank {} {} page {} {} ctx {}, {} slot(s), {} executor(s), exec page {}",
+                            cg.map(|g| g.to_string()).unwrap_or_else(|| "?".into()), epoch,
+                            describe(&enc, "bank"), describe(&enc, "bankName"), describe(&enc, "page"), describe(&enc, "pageName"), describe(&enc, "ctx"),
+                            rest.get("slots").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+                            rest.get("ex").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+                            rest.get("page").map(|v| v.to_string()).unwrap_or_else(|| "?".into())
+                        ));
+                    } else {
+                        self.note(format!("context unknown (epoch {}): the plugin has not observed every part yet", epoch));
+                    }
+                }
+                self.context = Some(ConsoleContext { plugin_generation: pgen, epoch, known, generation: cg, body: rest, received_at: now });
             }
             FromPlugin::Effect { sid, seq, ev, ms, frames, why } => {
                 if !self.admit(&sid, seq, now) {
@@ -547,6 +610,11 @@ mod tests {
         }
         fn state(&mut self, full: bool, epoch: u64, items: Value) -> Vec<u8> {
             self.frame(json!({"t":"state","gen":self.generation,"epoch":epoch,"full":if full {1} else {0},"s":items}))
+        }
+        fn context(&mut self, epoch: u64, known: u8, cg: Option<u64>, enc: Value) -> Vec<u8> {
+            let mut v = json!({"t":"context","gen":self.generation,"epoch":epoch,"known":known,"enc":enc,"slots":[],"ex":[],"page":1,"pool":"Default","display":1});
+            if let Some(g) = cg { v["cg"] = json!(g); }
+            self.frame(v)
         }
     }
 
@@ -742,4 +810,69 @@ mod tests {
         link.receive(&foreign, 0.3);
         assert_eq!(link.stats.rejected, 2);
     }
+    #[test]
+    fn context_messages_are_kept_as_data_and_generation_moves_are_counted() {
+        let (mut link, mut plugin) = pair(100.0);
+        assert!(link.context.is_none());
+        let unknown = plugin.context(1, 0, None, json!({"why":"not observed"}));
+        link.receive(&unknown, 100.1);
+        let c = link.context.as_ref().unwrap();
+        assert!(!c.known && c.generation.is_none());
+        assert_eq!(link.stats.contexts, 1);
+        assert_eq!(link.stats.context_generations, 1);
+        let known = plugin.context(1, 1, Some(1), json!({"bank":1,"bankName":"Dimmer","page":1,"pageName":"Dimmer","ctx":"Default","attr":1}));
+        link.receive(&known, 100.2);
+        let c = link.context.as_ref().unwrap();
+        assert!(c.known && c.generation == Some(1));
+        assert_eq!(c.body["enc"]["bankName"], "Dimmer");
+        assert_eq!(link.stats.context_generations, 2);
+        let same = plugin.context(1, 1, Some(1), json!({"bank":1,"bankName":"Dimmer","page":1,"pageName":"Dimmer","ctx":"Default","attr":1}));
+        link.receive(&same, 101.2);
+        assert_eq!(link.stats.contexts, 3);
+        assert_eq!(link.stats.context_generations, 2, "a repeat of the same generation is not a move");
+        let moved = plugin.context(1, 1, Some(2), json!({"bank":4,"bankName":"Color","page":1,"pageName":"RGB","ctx":"Default","attr":1}));
+        link.receive(&moved, 101.3);
+        assert_eq!(link.context.as_ref().unwrap().generation, Some(2));
+        assert_eq!(link.stats.context_generations, 3);
+        assert!(link.log.iter().any(|l| l.contains("context generation 2") && l.contains("Color")), "{:?}", link.log);
+    }
+
+    #[test]
+    fn context_is_dropped_on_link_down_repair_and_a_new_pairing_until_a_fresh_one_arrives() {
+        let (mut link, mut plugin) = pair(0.0);
+        let known = plugin.context(1, 1, Some(5), json!({"bank":4,"bankName":"Color","page":1,"pageName":"RGB","ctx":"Default","attr":1}));
+        link.receive(&known, 0.1);
+        assert_eq!(link.context_view(0.2).unwrap().generation, Some(5));
+        // Stale by age: not presented, though still stored.
+        assert!(link.context_view(2.0).is_none());
+        // Watchdog: link down drops it.
+        link.tick(2.5);
+        assert!(!link.link_up);
+        assert!(link.context.is_none());
+        let hb = plugin.frame(json!({"t":"hb","held":[]}));
+        link.receive(&hb, 2.6);
+        assert!(link.link_up);
+        assert!(link.context_view(2.6).is_none(), "the link is back but no context arrived in it");
+        // Silence past repair_after: unpaired, nothing kept.
+        link.tick(7.0);
+        assert!(link.session().is_none());
+        assert!(link.context.is_none());
+        // A new pairing (a new plugin run with its own generations) starts without a context.
+        let out = plugin.decode(link.take_outgoing());
+        let nonce = out.iter().find(|p| p["t"] == "hello").unwrap()["nonce"].as_str().unwrap().to_string();
+        plugin.generation = "2-deadbeef".into();
+        let w = plugin.welcome(&nonce);
+        link.receive(&w, 7.1);
+        assert!(link.session().is_some());
+        assert!(link.context.is_none() && link.context_view(7.1).is_none());
+        let fresh = plugin.context(1, 1, Some(1), json!({"bank":1,"bankName":"Dimmer","page":1,"pageName":"Dimmer","ctx":"Default","attr":1}));
+        link.receive(&fresh, 7.2);
+        let c = link.context_view(7.3).unwrap();
+        assert_eq!((c.generation, c.plugin_generation.as_str()), (Some(1), "2-deadbeef"));
+        // A context the plugin marks unknown is stored but never presented.
+        let unknown = plugin.context(1, 0, None, json!({"why":"not observed"}));
+        link.receive(&unknown, 7.4);
+        assert!(link.context.is_some() && link.context_view(7.4).is_none());
+    }
+
 }
