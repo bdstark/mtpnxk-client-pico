@@ -38,6 +38,10 @@
 --   * deadline servicing runs before packet processing, packets per iteration are bounded, feedback
 --     reads are spread across frames; the loop yields once per console frame;
 --   * every state item is tri-state (0, 1, "?") and carries the plugin generation and feedback epoch;
+--   * KB-17: the control context (what each encoder slot and executor would operate) is the vendored
+--     feedback module's contextSnapshot, assembled from the loop's own observations and sent as a
+--     `context` message whenever its binding generation moves and with every full state; the plugin
+--     reconstructs no grandMA3 semantics of its own and sends nothing while a part is unobserved;
 --   * the MCP bridge and this plugin do not arbitrate the console keyboard: the start refuses to
 --     enable input while the bridge reports input enabled (force overrides; it is a courtesy check);
 --   * KB-15: the dispatch method of every key is decided before dispatch and reported at start; a
@@ -54,7 +58,7 @@ local my_handle     = select(4, ...)
 local socket = require("socket")
 local json   = require("json")
 
-local VERSION   = "0.2.1"
+local VERSION   = "0.3.0"
 local PROTOCOL  = 1
 local MAGIC     = "MTX1"
 local DEFAULTS = {
@@ -417,7 +421,8 @@ local function openSession(obj, ip, port, now)
   log("session %s opened for %s (%s fw %s, surface gen %s) from %s:%d; %d key(s) physically down, not pressed", sid, obj.id, tostring(obj.surface), tostring(obj.fw), tostring(obj.gen), ip, port, #held)
   local welcome = { t = "welcome", v = PROTOCOL, nonce = obj.nonce, gen = state.gen, lease = DEFAULTS.leaseMs, hb = DEFAULTS.hbMs,
                     keys = describeKeys(false), modules = state.moduleVersions, console = consoleInfo(), input = state.inputMode, backend = state.backendName,
-                    plugin = VERSION, epoch = fb() and fb():epoch() or nil }
+                    plugin = VERSION, epoch = fb() and fb():epoch() or nil,
+                    context = (fb() and type(fb().contextSnapshot) == "function") and 1 or 0 }
   sendToSession(s, welcome)
   s.lastFullAt = nil  -- the next tick sends a full state
   return s
@@ -662,12 +667,19 @@ state._handleDatagram = handleDatagram
 -------------------------------------------------------------------------------
 -- Feedback: watch list, tri-state collection, delta / full sending
 -------------------------------------------------------------------------------
+local contextSpec
 local function watchItems()
   local FB = state.modules.feedback and state.modules.feedback.module
   if not FB then return {} end
   local spec = { readers = { "blind", "highlight", "solo", "previewMode", "previewBar", "maState", "commandText", "page", "shortcutsActive" }, displays = { state.display } }
   if #state.execs > 0 then spec.executors = state.execs end
   local items = FB.itemsFor(spec)
+  -- KB-17: the control-context items (data pool, page, encoder bank and slots of the configured display,
+  -- one target per configured executor) are watched alongside, so the loop keeps them observed and the
+  -- context message is built from the cache without any read of its own.
+  if type(FB.contextItems) == "function" then
+    for _, it in ipairs(FB.contextItems(contextSpec(), nil)) do items[#items + 1] = it end
+  end
   return items
 end
 
@@ -719,6 +731,84 @@ local function collectState(now)
   return s
 end
 state._collectState = collectState
+
+-- KB-17: the snapshot spec this plugin follows (the configured display and executors).
+contextSpec = function()
+  local spec = { display = state.display }
+  if #state.execs > 0 then spec.executors = state.execs end
+  return spec
+end
+
+-- The context message: a compact copy of the cached contextSnapshot. nil while the module is missing or
+-- older than 0.3.0. `known` is 0 while any part is unobserved in this epoch (no generation is claimed then).
+local function collectContext(now)
+  local inst = fb()
+  if not inst or type(inst.contextSnapshot) ~= "function" then return nil end
+  local ok, snap = pcall(inst.contextSnapshot, inst, contextSpec(), now, { cached = true })
+  if not ok then logerr("contextSnapshot raised: %s", tostring(snap)); return nil end
+  local known = (snap.generationUnknown ~= true and snap.stale ~= true) and 1 or 0
+  local msg = { t = "context", gen = state.gen, epoch = snap.epoch, known = known, cg = snap.generation, display = snap.display,
+                pool = snap.identity and snap.identity.dataPool and snap.identity.dataPool.name or "?",
+                page = snap.executorPage and snap.executorPage.no or "?" }
+  local e = snap.encoder
+  if e and e.available and not e.stale then
+    msg.enc = { bank = e.value.bank.index, bankName = e.value.bank.name or "?", page = e.value.page.index, pageName = e.value.page.name or "?", ctx = e.value.context or "?", attr = e.value.attributeEditing == true and 1 or 0 }
+  else
+    msg.enc = { why = e and (e.reason or e.error) or "not observed" }
+  end
+  local sl = snap.slots
+  msg.slots = {}
+  if sl and sl.available and not sl.stale then
+    for _, x in ipairs(sl.value.slots) do
+      local r = { n = x.slot, kind = x.kind }
+      if x.kind == "attribute" then
+        r.name, r.label, r.unit, r.readout, r.res, r.layer, r.cf = x.name, x.label or "", x.unit or "?", x.readout or "?", x.resolution or "?", x.layer or "?", x.channelFunction or ""
+        r.avail, r.val = x.availability, x.valueState
+        if x.absolute ~= nil then r.abs = x.absolute end
+      elseif x.kind == "other" then r.ref = x.ref end
+      msg.slots[#msg.slots + 1] = r
+    end
+    msg.sel = sl.value.selection and sl.value.selection.count or "?"
+  else
+    msg.slotsWhy = sl and (sl.reason or sl.error) or "not observed"
+  end
+  msg.ex = {}
+  for _, x in ipairs(snap.executors or {}) do
+    local r = { n = x.params and x.params.executor }
+    if x.available and not x.stale then
+      local v = x.value
+      r.n = v.executor
+      r.empty = v.empty and 1 or 0
+      r.tgt = v.playbackTarget and 1 or 0
+      if v.assigned then r.cls, r.name = v.assigned.class or "?", v.assigned.name or "?" end
+      if v.functions then r.kp, r.ku, r.fd = v.functions.keyPress or "", v.functions.keyUnpress or "", v.functions.fader or "" end
+      if v.level and type(v.level.value) == "number" then r.lvl = math.floor(v.level.value + 0.5); r.tok = v.level.token end
+      if v.active ~= nil then r.act = v.active and 1 or 0 else r.act = "?" end
+      if v.appearance and v.appearance.backRGBA then r.rgba = v.appearance.backRGBA end
+      if v.reason then r.why = v.reason end
+    else
+      r.why = x.reason or x.error or "not observed"
+    end
+    msg.ex[#msg.ex + 1] = r
+  end
+  return msg
+end
+state._collectContext = collectContext
+
+local function sendContexts(now, msg)
+  if not msg then return end
+  for _, s in pairs(state.sessions) do
+    if s.state == "active" then
+      local due = s.lastContextAt == nil or (now - s.lastContextAt) >= DEFAULTS.fullStateMs / 1000
+      local moved = s.lastContextGen ~= msg.cg or s.lastContextKnown ~= msg.known or s.lastContextEpoch ~= msg.epoch
+      if due or moved then
+        sendToSession(s, msg)
+        s.lastContextAt, s.lastContextGen, s.lastContextKnown, s.lastContextEpoch = now, msg.cg, msg.known, msg.epoch
+        state.counters.contexts = state.counters.contexts + 1
+      end
+    end
+  end
+end
 
 local function stateChanged(a, b)
   if a == nil or b == nil then return true end
@@ -902,6 +992,7 @@ local function tick(now)
   local cur = collectState(now)
   state.lastState = cur
   sendStates(now)
+  sendContexts(now, collectContext(now))
   serviceBench(now)
   -- Housekeeping (cheap, bounded).
   if now - (state.lastSweep or 0) > 5 then
@@ -925,7 +1016,7 @@ end
 local function resetCounters()
   state.counters = { received = 0, sent = 0, sendErrors = 0, rejected = 0, oversized = 0, notAllowed = 0, ignored = 0, noSession = 0,
                      oldSeq = 0, rateDropped = 0, dupEvents = 0, superseded = 0, refused = 0, presses = 0, releases = 0, wheels = 0, lostReleases = 0,
-                     replayedHello = 0, addressChanged = 0, fullStates = 0, deltaStates = 0, ticks = 0 }
+                     replayedHello = 0, addressChanged = 0, fullStates = 0, deltaStates = 0, contexts = 0, ticks = 0 }
 end
 
 local function loadModules()

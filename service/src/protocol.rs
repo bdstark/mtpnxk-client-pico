@@ -125,6 +125,23 @@ pub enum FromPlugin {
         #[serde(default)]
         s: BTreeMap<String, Value>,
     },
+    /// KB-17: the plugin's control-context message (what each encoder slot and executor would operate),
+    /// a compact copy of the vendored feedback module's `contextSnapshot`. `known` is 0 while a part of it
+    /// is unobserved on the plugin side (then `cg`, the binding generation, is absent). The service keeps
+    /// it as data for later binding work and reconstructs no console semantics from it.
+    Context {
+        sid: String,
+        seq: u64,
+        #[serde(rename = "gen")]
+        generation: String,
+        epoch: u64,
+        #[serde(default)]
+        known: u8,
+        #[serde(default)]
+        cg: Option<u64>,
+        #[serde(flatten)]
+        rest: BTreeMap<String, Value>,
+    },
     Err {
         #[serde(default)]
         sid: Option<String>,
@@ -213,6 +230,22 @@ mod tests {
                 assert_eq!(Pending::from_value(&s["pending"]), Pending::Word("store".into()));
             }
             _ => panic!("not a state"),
+        }
+        let c: FromPlugin = serde_json::from_str(r#"{"t":"context","sid":"a","seq":4,"gen":"1-1","epoch":1,"known":1,"cg":3,"display":1,"pool":"Default","page":1,"enc":{"bank":4,"bankName":"Color","page":1,"pageName":"RGB","ctx":"Default","attr":1},"slots":[{"n":1,"kind":"attribute","name":"ColorRGB_R","label":"R","unit":"ColorComponent","readout":"Percent","res":"Coarse","layer":"Absolute","cf":"","avail":"available","val":"value","abs":50}],"sel":1,"ex":[{"n":191,"empty":0,"tgt":1,"cls":"Sequence","name":"Main","kp":"Temp","ku":"","fd":"Master","lvl":100,"tok":"FaderMaster","act":0}]}"#).unwrap();
+        match c {
+            FromPlugin::Context { known, cg, rest, .. } => {
+                assert_eq!(known, 1);
+                assert_eq!(cg, Some(3));
+                assert_eq!(rest["enc"]["bankName"], "Color");
+                assert_eq!(rest["slots"][0]["name"], "ColorRGB_R");
+                assert_eq!(rest["ex"][0]["tgt"], 1);
+            }
+            _ => panic!("not a context"),
+        }
+        let u: FromPlugin = serde_json::from_str(r#"{"t":"context","sid":"a","seq":5,"gen":"1-1","epoch":1,"known":0,"enc":{"why":"not observed"},"slots":[],"ex":[]}"#).unwrap();
+        match u {
+            FromPlugin::Context { known, cg, .. } => { assert_eq!(known, 0); assert_eq!(cg, None); }
+            _ => panic!("not a context"),
         }
     }
 

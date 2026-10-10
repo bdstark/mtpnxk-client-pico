@@ -46,7 +46,7 @@ last full state (section 5).
 
 **Protocol versions.** `v` in `hello`/`welcome` is the surface-protocol
 version (1). `welcome.modules` carries the vendored module versions
-(`gma3_mcp_hardkeys` 0.5.0, `gma3_mcp_feedback` 0.2.0, API 1) so the service can
+(`gma3_mcp_hardkeys` 0.10.0, `gma3_mcp_feedback` 0.3.0, API 1) so the service can
 log what it is paired with. onPC 2.5.1.0 is the only console version the
 readers and routes are verified on (KB-01 to KB-06, macOS); the plugin
 refuses nothing on other versions but reports `console` in `welcome`.
@@ -54,6 +54,27 @@ refuses nothing on other versions but reports `console` in `welcome`.
 Not carried: `lastCommand` (shared history, no LED use), `selectedSequence`
 (M-Touch later), raw `commandText` (quoting and size; `pending` is enough for
 the NX-K).
+
+### 1a. Control context (`context` message, KB-17)
+
+The plugin also sends `{t:"context", sid, seq, gen, epoch, known, cg?, display, pool, page, enc, slots[], sel?, slotsWhy?, ex[]}`:
+a compact copy of the vendored feedback module's `contextSnapshot()` (`gma3_mcp_feedback` 0.3.0, built from the same
+watched observations as `state`, with no read of its own). It says what each encoder slot and executor would
+operate right now; the service keeps it as data (`Link.context`) and renders or binds nothing from it yet (KB-18+).
+
+| Field | Meaning |
+| --- | --- |
+| `known` | `1` when every part was observed in this epoch; `0` otherwise, and then `cg` is absent (no generation is claimed, as the module does) |
+| `cg` | the module's binding generation for this plugin's spec (configured display and executors): it moves when an input's meaning changed (identity, bank/page/context, a slot's object, resolution, readout, channel function, layer or availability, the executor page, an executor's assignment, functions or target status, or any of these becoming unreadable), never for a value, level, activity or label alone. Comparable only within one `(gen, epoch)` |
+| `display`, `pool`, `page` | the authoritative display (the plugin's `display=` argument, default 1; never another display), the data pool name, the executor page number (`"?"` when unknown) |
+| `enc` | `{bank, bankName, page, pageName, ctx, attr}` (1-based, `attr = 1` for the `Default` attribute-editing context) or `{why}` when that display's encoder bar is unavailable |
+| `slots[]` | per pool slot: `{n, kind}` plus, for `attribute`, `name, label, unit, readout, res, layer, cf` (channel function), `avail` (`no-selection | available | unavailable | mixed`), `val` (`none | value | empty | mixed | unavailable`) and `abs` when a programmer value exists; `kind = "other"` carries `ref` (phaser/editor slots, unsupported); `kind = "empty"` nothing |
+| `sel` / `slotsWhy` | the selection count the availability was judged on / why the slots are unavailable |
+| `ex[]` | per configured executor: `{n, empty, tgt, cls, name, kp, ku, fd, lvl, tok, act, rgba, why}`: `tgt = 0` for a Quickey object or an executor reserved by an owned Quickey bank (never a playback target), `lvl` the level of the **configured** fader function (`tok`), `act` `0/1/"?"` |
+
+Sent in the frame `cg`, `known` or `epoch` changes and with the full-state cadence (1000 ms) otherwise. The
+welcome carries `context: 1` when the vendored module supports it. The plugin's `display=` argument names the
+authoritative encoder bar; it is not discovered.
 
 ## 2. Pairing and packet semantics
 
