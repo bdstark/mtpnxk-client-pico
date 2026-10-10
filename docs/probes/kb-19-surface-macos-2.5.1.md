@@ -8,7 +8,9 @@ programmer back through its `cmd` and `lua` ops; its own control instance stayed
 backend (no key injection); only the control path was exercised. Re-run unchanged after the PR #23 review re-vendor
 (`107f548`: attribute-editing context required, complete physical ranges only, calibration in the digest): same
 script, same value 3.300005, same refusal of the push; and once more after review round 2 (`107f548`, a failed channel
-discovery is incomplete coverage): same result.
+discovery is incomplete coverage): same result. Round 3 (`107f548`, an unmappable channel is incomplete discovery) changed only
+the feedback module's scan bookkeeping; the vendored copy matches upstream and the surface harness passes (195); the MCP
+repository's live probe re-ran 39/39 on it.
 
 ## Procedure
 
