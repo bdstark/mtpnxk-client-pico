@@ -4,6 +4,7 @@
 mod auth;
 mod leds;
 mod link;
+mod mtouch;
 mod nxk;
 mod protocol;
 mod sim;
@@ -67,6 +68,25 @@ enum Cmd {
     },
     /// List USB devices.
     List,
+    /// KB-16: print every report of an M-Touch or M-Play (decoded, with the raw packet) and a
+    /// summary on exit. Not wired into the link; the operator's hardware qualification tool.
+    MtouchListen {
+        /// Seconds to listen (0 = until the device goes away or the process is killed).
+        #[arg(long, default_value_t = 30.0)]
+        seconds: f64,
+        /// Product id to open: f808 (M-Touch) or f80c (M-Play); default: the first of either.
+        #[arg(long)]
+        pid: Option<String>,
+    },
+    /// KB-16: walk every LED key, fader bar and page display of an M-Touch or M-Play with a
+    /// deterministic sequence, printing each write so an operator can confirm it by eye.
+    MtouchLedTest {
+        #[arg(long)]
+        pid: Option<String>,
+        /// Milliseconds each step is held.
+        #[arg(long, default_value_t = 300)]
+        hold_ms: u64,
+    },
     /// Print a fresh random pairing key.
     Keygen,
 }
@@ -218,6 +238,8 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::MtouchListen { seconds, pid } => mtouch::tools::listen(mtouch_model(pid.as_deref())?, *seconds),
+        Cmd::MtouchLedTest { pid, hold_ms } => mtouch::tools::led_test(mtouch_model(pid.as_deref())?, Duration::from_millis(*hold_ms)),
         Cmd::Run => {
             let mut lp = Loop::new(&cli)?;
             loop {
@@ -279,6 +301,13 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// `--pid f808|f80c` (with or without 0x) to a model; `None` means the first found.
+fn mtouch_model(pid: Option<&str>) -> Result<Option<mtouch::Model>> {
+    let Some(p) = pid else { return Ok(None) };
+    let n = u16::from_str_radix(p.trim_start_matches("0x"), 16).with_context(|| format!("parsing --pid {p}"))?;
+    mtouch::Model::from_pid(n).map(Some).ok_or_else(|| anyhow!("--pid {p}: not an M-Touch (f808) or M-Play (f80c)"))
 }
 
 fn print_summary(link: &link::Link) {

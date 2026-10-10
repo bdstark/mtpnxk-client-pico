@@ -11,6 +11,8 @@ cargo build --release
 ./target/release/mtpnxk --key <hex> sim --script "Record:down,5:tap@50,Record:up@300,Enter:tap"
 ./target/release/mtpnxk --key <hex> bench --taps 200 --rate 20
 ./target/release/mtpnxk list                        # USB devices
+./target/release/mtpnxk mtouch-listen --seconds 240 # KB-16: decode an M-Touch / M-Play (--pid f808|f80c)
+./target/release/mtpnxk mtouch-led-test             # KB-16: walk every LED, bar and display by eye
 ```
 
 `--plugin host:port` (default `127.0.0.1:9810`) names the plugin; `--key-file`
@@ -41,11 +43,22 @@ Plugin "mtpnxk_surface" "key=<hex>"
   `pending`, HighLight blinks while on, Preview follows the mode, Clear/Undo/
   Next/Last/Menu/Snap Shot echo the hold, Bank and the encoders light while
   Bank is held, Link blinks whenever the state is not fresh. Unknown is off.
+- `mtouch`: the Martin M-Touch (`11be:f808`) and M-Play (`11be:f80c`):
+  control tables for both models, the decoder for the four report types
+  (single key, single fader, key bank, analog bank; bank unit count read from
+  the packet; concatenated reports split), and pure output encoders for LED
+  keys (`0x80`), fader bars (`0x61`) and the page display (`0x54`), ported
+  from MTouchPlay `e48eb2c` and regression-tested against its capture logs.
+  `mtouch-listen` and `mtouch-led-test` are the operator's hardware
+  qualification tools ([docs/mtouch-protocol-reuse.md](../docs/mtouch-protocol-reuse.md));
+  neither device has been connected to this service and neither is wired into
+  the link (`run`, `sim` and `bench` are NX-K only).
 - `sim`: a scripted keypad for machines without the hardware; `bench` is a
   scripted tap run that prints ack round-trip percentiles and, when the plugin
   was started with `bench`, press-to-effect percentiles.
 
-`cargo test` runs the 19 unit tests, including a fake plugin that exercises the
-link's retransmission, loss, freshness and re-pairing paths. Operator setup and
+`cargo test` runs the 36 unit tests, including a fake plugin that exercises the
+link's retransmission, loss, freshness and re-pairing paths and 17 M-Touch /
+M-Play regressions against the documented captures. Operator setup and
 recovery: [docs/operator-guide.md](../docs/operator-guide.md); qualified
 deployments: [docs/deployments.md](../docs/deployments.md).

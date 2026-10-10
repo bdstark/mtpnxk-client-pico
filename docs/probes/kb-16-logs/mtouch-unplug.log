@@ -1,0 +1,5 @@
+M-Touch (no serial) (11be:f808) open; listening on EP 0x82 for ever ... (touch faders / press keys)
+M-Touch: read failed: unknown (error 0xe00002ed); device gone?
+    6.662  M-Touch disconnected
+--- 6.7 s: 0 events; reports by type: none; idle polls=818 (122.8/s)
+exit=0

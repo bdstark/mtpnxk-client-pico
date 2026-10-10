@@ -210,3 +210,16 @@ changed one KB-07 check: a key whose shortcut row is off is pressed with a tempo
 second display, show save/reload with the bank, Windows/Linux, LED behaviour seen by an operator, the
 press-to-effect figure for Quickey taps (the bench's tap length dominates it, see the record).
 
+## KB-16 — Qualify existing hardware protocols (surface half, 2026-10-10)
+
+The Rust service gains `src/mtouch/`: control tables, report decoder and output encoders for the Martin
+M-Touch (`11be:f808`) and M-Play (`11be:f80c`), ported from the MTouchPlay repository at `e48eb2c` and
+regression-tested against its capture logs (17 tests; `cargo test` now runs 36), plus the operator commands
+`mtouch-listen` and `mtouch-led-test`. What was reused, what was not re-verified, the regression table and
+the live qualification procedure (recorded into `docs/probes/kb-16-hardware-<device>-<os>.md`) are in
+[docs/mtouch-protocol-reuse.md](docs/mtouch-protocol-reuse.md). Both devices were qualified live on macOS the same day
+([M-Touch](docs/probes/kb-16-hardware-mtouch-macos.md), [M-Play](docs/probes/kb-16-hardware-mplay-macos.md):
+every control, report type and output write, idle polls, queued reports at open, unplug and replug), and nothing is wired
+into the link (`run`/`sim`/`bench` remain NX-K only; integration is KB-20+). Hardware protocol
+qualification does not establish grandMA3 behaviour: the console-semantics half of KB-16 lives in
+bdstark/GrandMA3MCP `ENCODERS.md`.
