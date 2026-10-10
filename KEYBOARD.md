@@ -262,7 +262,7 @@ plugin's default `display=1` is the one that answers. Wiring the context into en
 
 The module half is in the MCP repository (`gma3_mcp_control` 0.1.0, bridge 0.14.0, branch `feat/kb18-control-admission`,
 PR bdstark/GrandMA3MCP#22, live record `docs/probes/kb-18-control-macos-2.5.1.md` there, 30/30). This repository vendors the
-0.10.0/0.3.0/0.1.0 set unchanged from `2516167` (both PR #22 review rounds included: late releases end their hold,
+0.10.0/0.3.0/0.1.0 set unchanged from `9f08f87` (both PR #22 review rounds included: late releases end their hold,
 reserved release capacity, batched recovery, rebound holds on the generation change itself, stale snapshots refused,
 binding revisions, releases kept across a rebind, the binding revision required unless a fixed binding is declared, which this plugin does) ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md)) and adds the surface side:
 
