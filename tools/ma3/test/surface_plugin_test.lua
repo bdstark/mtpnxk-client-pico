@@ -505,6 +505,7 @@ do
     inst.contextSnapshot = function(self, spec, t, opts)
       local snap = real(self, spec, t, opts)
       snap.generation, snap.generationUnknown, snap.generationNote, snap.stale, snap.notObserved = gen, nil, nil, nil, 0
+      snap.encoder = { available = true, value = { display = 1, bank = { index = 1, name = "Dimmer", pages = 1 }, page = { index = 1, name = "Dimmer", slots = 2 }, context = "Default", attributeEditing = true } }
       snap.slots = { available = true, value = { bank = { index = 1, name = "Dimmer" }, page = { index = 1, name = "Dimmer" }, context = "Default", selection = { count = 1, fixtures = { 401 }, identityComplete = true }, slots = {
         { slot = 1, kind = "attribute", ref = "Attribute 1 'Dimmer'", name = "Dimmer", layer = "Absolute", resolution = "Coarse", readout = "Percent", channelFunction = "Dimmer", availability = "available", physicalRange = 1 },
         { slot = 2, kind = "attribute", ref = "Attribute 2 'Pan'", name = "Pan", layer = "Absolute", resolution = "Coarse", readout = "Physical", channelFunction = "", availability = "available", physicalRange = 450, physicalFrom = -225, physicalTo = 225 },

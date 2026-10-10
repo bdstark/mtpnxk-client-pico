@@ -308,7 +308,7 @@ KB-18: the adjustment backend, calibration and the meaning of `fine` are KB-19 (
 The console half is in the MCP repository (`gma3_mcp_control` 0.2.0 with the **console adjustment backend**,
 `gma3_mcp_feedback` 0.4.0 with each slot's physical range, bridge 0.15.0 `control=console`, branch
 `feat/kb19-adjustment-backend`, PR bdstark/GrandMA3MCP#23, live record `docs/probes/kb-19-adjust-macos-2.5.1.md` there,
-39/39). This repository vendors the 0.10.0/0.4.0/0.2.0 set unchanged from `874e7bd` ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md))
+39/39). This repository vendors the 0.10.0/0.4.0/0.2.0 set unchanged from `e142672` ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md))
 and adds the surface side:
 
 - **Slots, not attribute names:** rotary n is encoder slot n of the bound display (section 3a); the vendored backend
