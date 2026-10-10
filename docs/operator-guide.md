@@ -158,6 +158,13 @@ acknowledged `unsupported`. Without `control=console` (or with `control=fake`) n
 plugin's `status` and the service's summary line say which backend is active and why an event was refused (no
 selection, the slot is unavailable for the selection, an unqualified readout or an editor context).
 
+With an M-Touch attached as well (KB-20, `mtpnxk run` opens it next to the NX-K), its four right-hand base-channel strips
+are the same four encoder slots (`--strip-slots` as `--rotary-slots`): touch a strip and drag; the value follows the
+movement from where it was (no jump to the touched spot), a full stroke is one attribute range, lift and touch again to
+keep going; the strip's own key held (or Bank on the NX-K) is a tenth of a click. `--strips absolute` makes the strips
+place values instead, but only after the strip passes the slot's current value (pickup) or when the strip's key is held
+as you touch (takeover, which also lets a mixed selection be set to one value); `--strips off` ignores them.
+
 The plugin never guesses a route: a key that does not resolve is reported at
 start and every event for it is acknowledged `unsupported`.
 

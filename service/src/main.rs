@@ -8,6 +8,8 @@ mod mtouch;
 mod nxk;
 mod protocol;
 mod sim;
+mod strips;
+mod usb_surfaces;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
@@ -41,6 +43,20 @@ struct Cli {
     /// the bound page does not have is refused by the plugin with the reason.
     #[arg(long, default_value_t = 1, global = true, value_parser = clap::value_parser!(u8).range(1..=5))]
     rotary_slots: u8,
+    /// KB-20: what the M-Touch's four base-channel strips do: `relative` (default: touch anchors, the drag adjusts
+    /// the slot like a rotary, lift and retouch re-anchors), `absolute` (positions after pickup or an explicit
+    /// takeover with the strip's key held at touch-down) or `off`.
+    #[arg(long, default_value = "relative", global = true)]
+    strips: strips::Mode,
+    /// KB-20: the first encoder slot the four strips mean (as --rotary-slots for the rotaries).
+    #[arg(long, default_value_t = 1, global = true, value_parser = clap::value_parser!(u8).range(1..=5))]
+    strip_slots: u8,
+    /// KB-20: detents across a strip's full travel (120 = the five encoder turns of one attribute range).
+    #[arg(long, default_value_t = 120, global = true, value_parser = clap::value_parser!(i32).range(1..=4096))]
+    strip_travel: i32,
+    /// KB-20: `auto` opens an attached M-Touch next to the NX-K in `run` (retrying while it is absent); `off` ignores it.
+    #[arg(long, default_value = "auto", global = true)]
+    mtouch: String,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -125,6 +141,9 @@ struct Loop {
     bye_on_exit: bool,
     /// KB-19: the first encoder slot of the rotaries (`--rotary-slots`).
     rotary_base: u8,
+    /// KB-20: the M-Touch parameter strips' gesture converter.
+    strips: strips::Strips,
+    strips_log_seen: usize,
 }
 
 impl Loop {
@@ -138,7 +157,12 @@ impl Loop {
         if cli.rotary_slots != 1 {
             eprintln!("rotaries: explicit slot window {}-{} (--rotary-slots {})", cli.rotary_slots, cli.rotary_slots + 3, cli.rotary_slots);
         }
-        Ok(Loop { link: link::Link::new(cfg, key, 0.0), leds: leds::Renderer::new(), sock, started, verbose: cli.verbose, log_seen: 0, bank_held: false, bye_on_exit: true, rotary_base: cli.rotary_slots })
+        let strip_cfg = strips::Config { mode: cli.strips, base_slot: cli.strip_slots, detents_per_travel: cli.strip_travel, ..strips::Config::default() };
+        if cli.strips != strips::Mode::Off {
+            eprintln!("strips: {:?} on slots {}-{}, {} detents per travel (--strips/--strip-slots/--strip-travel)", cli.strips, cli.strip_slots, cli.strip_slots + 3, cli.strip_travel);
+        }
+        Ok(Loop { link: link::Link::new(cfg, key, 0.0), leds: leds::Renderer::new(), sock, started, verbose: cli.verbose, log_seen: 0, bank_held: false, bye_on_exit: true, rotary_base: cli.rotary_slots,
+                  strips: strips::Strips::new(strip_cfg), strips_log_seen: 0 })
     }
 
     fn now(&self) -> f64 {
@@ -178,6 +202,41 @@ impl Loop {
                 }
             }
         }
+        // KB-20: the M-Touch's parameter strips. The converter emits the same control events the rotaries do;
+        // the binding generation and the slot's last known value come from the link's context.
+        let strip_events = match surface.poll_strips() {
+            Ok(ev) => ev,
+            Err(e) => {
+                eprintln!("strips: {e:#}; ending every touch");
+                let outs = self.strips.disconnect();
+                self.emit_strip_outs(outs, now);
+                Vec::new()
+            }
+        };
+        for ev in strip_events {
+            match ev {
+                mtouch::Event::Fader { id, value, touch, .. } => {
+                    if let Some(n) = strips::strip_of_fader(id) {
+                        let cg = self.link.current_generation(now);
+                        let slot = self.strips.cfg.base_slot.clamp(1, 5) + n - 1;
+                        let hint = self.link.slot_hint(slot, now);
+                        let outs = self.strips.fader(n, value, touch, self.bank_held, cg, hint, now);
+                        self.emit_strip_outs(outs, now);
+                    } else {
+                        self.strips.stats.ignored += 1;  // playback strips are not parameters (KB-21/22)
+                    }
+                }
+                mtouch::Event::KeyDown { id, .. } | mtouch::Event::KeyUp { id, .. } => {
+                    if let Some(n) = strips::strip_of_key(id) {
+                        self.strips.key(n, matches!(ev, mtouch::Event::KeyDown { .. }));
+                    }
+                }
+                mtouch::Event::Pressure { .. } => self.strips.stats.ignored += 1,  // never an input (KB-20)
+            }
+        }
+        let cg = self.link.current_generation(now);
+        let outs = self.strips.tick(cg, now);
+        self.emit_strip_outs(outs, now);
         let mut buf = [0u8; 2048];
         loop {
             match self.sock.recv(&mut buf) {
@@ -206,14 +265,34 @@ impl Loop {
                 eprintln!("link: {}", self.link.log[self.log_seen]);
                 self.log_seen += 1;
             }
+            while self.strips_log_seen < self.strips.log.len() {
+                eprintln!("strips: {}", self.strips.log[self.strips_log_seen]);
+                self.strips_log_seen += 1;
+            }
         }
         Ok(())
+    }
+
+    fn emit_strip_outs(&mut self, outs: Vec<strips::Out>, now: f64) {
+        for o in outs {
+            self.link.control_event("mtouch", o.control, o.target, o.kind, now);
+        }
     }
 
     fn run(&mut self, surface: &mut dyn Surface, until: impl Fn(&Loop, &dyn Surface) -> bool) -> Result<()> {
         eprintln!("mtpnxk {}: {} -> plugin at {}", env!("CARGO_PKG_VERSION"), surface.name(), self.sock.peer_addr().map(|a| a.to_string()).unwrap_or_default());
         loop {
-            self.step(surface)?;
+            if let Err(e) = self.step(surface) {
+                // The keypad went away: end every strip touch before the caller reopens the devices.
+                let now = self.now();
+                let outs = self.strips.disconnect();
+                self.emit_strip_outs(outs, now);
+                self.link.tick(now);
+                for d in self.link.take_outgoing() {
+                    let _ = self.sock.send(&d);
+                }
+                return Err(e);
+            }
             if until(self, surface) {
                 break;
             }
@@ -279,8 +358,13 @@ fn main() -> Result<()> {
         Cmd::MtouchLedTest { pid, hold_ms } => mtouch::tools::led_test(mtouch_model(pid.as_deref())?, Duration::from_millis(*hold_ms)),
         Cmd::Run => {
             let mut lp = Loop::new(&cli)?;
+            let with_mtouch = match cli.mtouch.to_ascii_lowercase().as_str() {
+                "auto" => true,
+                "off" | "none" => false,
+                other => return Err(anyhow!("--mtouch {other}: expected auto or off")),
+            };
             loop {
-                let mut keypad = match nxk::usb::UsbKeypad::open() {
+                let keypad = match nxk::usb::UsbKeypad::open() {
                     Ok(k) => k,
                     Err(e) => {
                         eprintln!("{e:#}; retrying in 2 s");
@@ -288,8 +372,9 @@ fn main() -> Result<()> {
                         continue;
                     }
                 };
+                let mut surface = usb_surfaces::Combined::new(keypad, with_mtouch && cli.strips != strips::Mode::Off);
                 lp.leds.invalidate();
-                let r = lp.run(&mut keypad, |_, _| false);
+                let r = lp.run(&mut surface, |_, _| false);
                 eprintln!("keypad loop ended: {r:?}; reopening in 1 s");
                 std::thread::sleep(Duration::from_secs(1));
             }
@@ -306,7 +391,7 @@ fn main() -> Result<()> {
                 let finished = !repeat && s.done() && lp.started.elapsed() > Duration::from_millis(500) && lp.link.pending_count() == 0;
                 timed_out || finished
             })?;
-            print_summary(&lp.link);
+            print_summary(&lp.link, &lp.strips);
             Ok(())
         }
         Cmd::Bench { taps, rate } => {
@@ -325,7 +410,7 @@ fn main() -> Result<()> {
             let mut lp = Loop::new(&cli)?;
             lp.run(&mut keypad, |lp, _| lp.started.elapsed() > total)?;
             println!("bench: {} taps at {rate}/s against {}", taps, cli.plugin);
-            print_summary(&lp.link);
+            print_summary(&lp.link, &lp.strips);
             percentiles("ack round trip", &lp.link.rtt_ms);
             let effects: Vec<f64> = lp.link.effect_ms.iter().filter(|m| **m >= 0).map(|m| *m as f64).collect();
             let no_effect = lp.link.effect_ms.iter().filter(|m| **m < 0).count();
@@ -347,7 +432,7 @@ fn mtouch_model(pid: Option<&str>) -> Result<Option<mtouch::Model>> {
     mtouch::Model::from_pid(n).map(Some).ok_or_else(|| anyhow!("--pid {p}: not an M-Touch (f808) or M-Play (f80c)"))
 }
 
-fn print_summary(link: &link::Link) {
+fn print_summary(link: &link::Link, strips: &strips::Strips) {
     let st = &link.stats;
     println!(
         "link: paired={} hellos={} events={} acked={} refused={} retransmitted={} lost={} superseded={} states={} link_downs={} rejected={} dropped_unpaired={}",
@@ -368,6 +453,13 @@ fn print_summary(link: &link::Link) {
         "control: events={} sent={} coalesced={} unbound={} aged={} stale={} unsupported={} refused={} lost_reported={} superseded={} overflow={} queued={} max_detent={}",
         st.ctl_events, st.ctl_sent, st.ctl_coalesced, st.ctl_unbound, st.ctl_aged, st.ctl_stale, st.ctl_unsupported, st.ctl_refused, st.ctl_lost_reported, st.ctl_superseded, st.ctl_overflow, link.queued_motion(), st.ctl_max_detent
     );
+    let ss = &strips.stats;
+    if ss.reports > 0 || strips.cfg.mode != strips::Mode::Off {
+        println!(
+            "strips: mode={:?} reports={} touches={} lifts={} detents={} positions={} rebound_dropped={} forced_lifts={} waiting_pickup={} takeovers={} ignored={}",
+            strips.cfg.mode, ss.reports, ss.touches, ss.lifts, ss.detents, ss.positions, ss.rebound_dropped, ss.forced_lifts, ss.waiting_pickup, ss.takeovers, ss.ignored
+        );
+    }
     if let Some(s) = link.session() {
         println!("session: sid={} plugin gen={} input={:?} control={} keys ok={} unsupported={:?}", s.sid, s.plugin_gen, s.input, if s.control { s.control_backend.clone().unwrap_or_else(|| "on".into()) } else { "off".into() }, s.keys.ok.len(), s.keys.unsupported);
     }

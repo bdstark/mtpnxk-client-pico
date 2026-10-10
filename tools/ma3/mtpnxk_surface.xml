@@ -6,7 +6,7 @@
      The entry component must stay first: Plugin "<name>" calls the first component's function only.
      The three gma3_mcp_* components are vendored from bdstark/GrandMA3MCP (see VENDOR.md). -->
 <GMA3 DataVersion="0.8.84.0">
-    <UserPlugin Name="mtpnxk_surface" Author="mtpnxk" Version="0.5.0">
+    <UserPlugin Name="mtpnxk_surface" Author="mtpnxk" Version="0.6.0">
         <ComponentLua Name="mtpnxk_surface" FileName="mtpnxk_surface.lua" />
         <ComponentLua Name="gma3_mcp_hardkeys" FileName="gma3_mcp_hardkeys.lua" />
         <ComponentLua Name="gma3_mcp_feedback" FileName="gma3_mcp_feedback.lua" />

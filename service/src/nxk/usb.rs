@@ -24,6 +24,11 @@ pub trait Surface {
     fn done(&self) -> bool {
         false
     }
+    /// KB-20: reports of an attached M-Touch (the parameter strips and their keys), decoded; none by default.
+    /// `Err` means the M-Touch went away (the keypad may still be fine).
+    fn poll_strips(&mut self) -> Result<Vec<crate::mtouch::Event>> {
+        Ok(Vec::new())
+    }
 }
 
 pub struct UsbKeypad {

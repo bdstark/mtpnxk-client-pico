@@ -112,8 +112,10 @@ const STATEFUL_FUNCTIONS: [&str; 7] = ["x", "xa", "xb", "crossfade", "crossfadea
 pub enum CtlKind {
     /// Encoder motion in detents; `fine` is the surface's explicit fine-adjustment modifier.
     Rel { dx: i32, fine: bool },
-    /// A strip or fader position, 0..1 of its travel.
-    Abs { v: f64 },
+    /// A strip or fader position, 0..1 of its travel. `takeover` (KB-20) is the surface's statement that the
+    /// operator deliberately chose an absolute operation: the console backend then places the value even on a
+    /// slot whose selected fixtures hold different values (otherwise refused `mixed-values`).
+    Abs { v: f64, takeover: bool },
     Touch { down: bool },
     Btn { down: bool },
 }
@@ -142,6 +144,7 @@ struct Motion {
     fine: bool,
     dx: i32,
     v: Option<f64>,
+    takeover: bool,
     first_at: f64,
     events: u32,
 }
@@ -394,7 +397,7 @@ impl Link {
             PendingKind::Ctl(b) => {
                 let b = b.clone();
                 self.send_session(|sid, seq| {
-                    serde_json::to_string(&ToPlugin::Ctl { sid, seq, ev, k: b.k, dev: &b.dev, c: &b.c, es: b.es, cg: b.cg, gs: Some(b.gs), tgt: b.tgt, dx: None, v: None, d: Some(b.d), fine: None }).expect("ctl serialises")
+                    serde_json::to_string(&ToPlugin::Ctl { sid, seq, ev, k: b.k, dev: &b.dev, c: &b.c, es: b.es, cg: b.cg, gs: Some(b.gs), tgt: b.tgt, dx: None, v: None, d: Some(b.d), fine: None, tk: None }).expect("ctl serialises")
                 })
             }
         }
@@ -407,8 +410,21 @@ impl Link {
         v
     }
 
-    fn current_generation(&self, now: f64) -> Option<u64> {
+    pub fn current_generation(&self, now: f64) -> Option<u64> {
         self.context_view(now).and_then(|c| c.generation)
+    }
+
+    /// KB-20: what the last context said about an encoder slot's programmer value, for the strips' absolute-mode
+    /// pickup: `single` when the plugin reported one agreed value (`val` "value" with `abs`), the value as 0..1 of
+    /// the travel (the programmer's `absolute` is a percentage of the range at every readout). The context is
+    /// refreshed on a generation change and at least once a second, so this is the binding's last read, not live.
+    pub fn slot_hint(&self, slot: u8, now: f64) -> Option<crate::strips::SlotHint> {
+        let ctx = self.context_view(now)?;
+        let slots = ctx.body.get("slots")?.as_array()?;
+        let s = slots.iter().find(|x| x.get("n").and_then(|n| n.as_u64()) == Some(slot as u64))?;
+        let state = s.get("val").and_then(|v| v.as_str()).unwrap_or("");
+        let abs = s.get("abs").and_then(|v| v.as_f64()).map(|a| (a / 100.0).clamp(0.0, 1.0));
+        Some(crate::strips::SlotHint { single: state == "value" && abs.is_some(), value: abs })
     }
 
     /// Whether a newer position may replace a queued one for this target (review 7): an encoder slot or an
@@ -484,9 +500,9 @@ impl Link {
                         return;
                     }
                 }
-                self.motion.push(Motion { dev: dev.into(), c: c.into(), tgt, cg, gs, fine, dx, v: None, first_at: now, events: 1 });
+                self.motion.push(Motion { dev: dev.into(), c: c.into(), tgt, cg, gs, fine, dx, v: None, takeover: false, first_at: now, events: 1 });
             }
-            CtlKind::Abs { v } => {
+            CtlKind::Abs { v, takeover } => {
                 let Some(cg) = cg else {
                     self.stats.ctl_unbound += 1;
                     return;
@@ -501,7 +517,7 @@ impl Link {
                 // stateless (review 7); crossfades, Temp and unknown targets keep every position in order.
                 if self.position_supersedes(&tgt, now) {
                     if let Some(m) = self.motion.iter_mut().rev().find(|m| m.dev == dev && m.c == c) {
-                        if m.v.is_some() && m.cg == cg && m.gs == gs && m.tgt == tgt {
+                        if m.v.is_some() && m.cg == cg && m.gs == gs && m.tgt == tgt && m.takeover == takeover {
                             m.v = Some(v.clamp(0.0, 1.0));
                             m.events += 1;
                             self.stats.ctl_coalesced += 1;
@@ -516,7 +532,7 @@ impl Link {
                         self.stats.ctl_overflow += 1;
                     }
                 }
-                self.motion.push(Motion { dev: dev.into(), c: c.into(), tgt, cg, gs, fine: false, dx: 0, v: Some(v.clamp(0.0, 1.0)), first_at: now, events: 1 });
+                self.motion.push(Motion { dev: dev.into(), c: c.into(), tgt, cg, gs, fine: false, dx: 0, v: Some(v.clamp(0.0, 1.0)), takeover, first_at: now, events: 1 });
             }
             CtlKind::Touch { down } | CtlKind::Btn { down } => {
                 let k: &'static str = if matches!(kind, CtlKind::Touch { .. }) { "touch" } else { "btn" };
@@ -572,7 +588,8 @@ impl Link {
         self.stats.ctl_sent += 1;
         let (k, dx, v): (&'static str, Option<i32>, Option<f64>) = if m.v.is_some() { ("abs", None, m.v) } else { ("rel", Some(m.dx.clamp(-4096, 4096)), None) };
         let fine = if m.fine { Some(1) } else { None };
-        self.send_session(|sid, seq| serde_json::to_string(&ToPlugin::Ctl { sid, seq, ev, k, dev: &m.dev, c: &m.c, es, cg: Some(m.cg), gs: Some(m.gs), tgt: m.tgt, dx, v, d: None, fine }).expect("ctl serialises"));
+        let tk = if m.takeover && m.v.is_some() { Some(1) } else { None };
+        self.send_session(|sid, seq| serde_json::to_string(&ToPlugin::Ctl { sid, seq, ev, k, dev: &m.dev, c: &m.c, es, cg: Some(m.cg), gs: Some(m.gs), tgt: m.tgt, dx, v, d: None, fine, tk }).expect("ctl serialises"));
         self.last_flush.insert((m.dev.clone(), m.c.clone()), now);
     }
 
@@ -1343,8 +1360,8 @@ mod tests {
         let f = plugin.frame(v);
         link.receive(&f, 40.0);
         link.control_event("mtouch", "Strip1", exec, CtlKind::Touch { down: true }, 40.0);
-        link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.25 }, 40.001);
-        link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.5 }, 40.002);
+        link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.25, takeover: false }, 40.001);
+        link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.5, takeover: false }, 40.002);
         link.control_event("mtouch", "Strip1", exec, CtlKind::Touch { down: false }, 40.003);
         let out = plugin.decode(link.take_outgoing());
         let c = ctl_packets(&out);
@@ -1436,8 +1453,8 @@ mod tests {
         // Review 7: a crossfade's 1.0 -> 0.0 pair must reach the plugin as two positions.
         let x = CtlTarget::Executor { ex: 202, el: "fader" };
         link.control_event("mtouch", "Strip2", x, CtlKind::Touch { down: true }, 80.0);
-        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 1.0 }, 80.001);
-        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 0.0 }, 80.002);
+        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 1.0, takeover: false }, 80.001);
+        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 0.0, takeover: false }, 80.002);
         assert_eq!(link.queued_motion(), 2);
         assert_eq!(link.stats.ctl_coalesced, 0);
         link.tick(80.003);
@@ -1452,19 +1469,19 @@ mod tests {
         assert_eq!(c2[0]["v"], 0.0);
         // Temp keeps its positions too; a Master merges; an executor the context does not list is kept whole.
         let t = CtlTarget::Executor { ex: 203, el: "fader" };
-        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.0 }, 80.1);
-        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.3 }, 80.101);
+        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.0, takeover: false }, 80.1);
+        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.3, takeover: false }, 80.101);
         let m = CtlTarget::Executor { ex: 201, el: "fader" };
-        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.1 }, 80.1);
-        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.2 }, 80.101);
+        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.1, takeover: false }, 80.1);
+        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.2, takeover: false }, 80.101);
         let u = CtlTarget::Executor { ex: 299, el: "fader" };
-        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.1 }, 80.1);
-        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.2 }, 80.101);
+        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.1, takeover: false }, 80.1);
+        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.2, takeover: false }, 80.101);
         assert_eq!(link.queued_motion(), 5);
         assert_eq!(link.stats.ctl_coalesced, 1);
         // A slot target merges (an attribute's value is stateless).
-        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.1 }, 80.2);
-        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.9 }, 80.201);
+        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.1, takeover: false }, 80.2);
+        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.9, takeover: false }, 80.201);
         assert_eq!(link.stats.ctl_coalesced, 2);
         // The per-control queue is bounded: beyond motion_per_control the oldest position of that control is dropped and counted.
         let mut link2 = Link::new(Config { id: "nxk-test".into(), motion_per_control: 3, ..Config::default() }, Key::from_hex(&"0123456789abcdef".repeat(4)).unwrap(), 90.0);
@@ -1479,7 +1496,7 @@ mod tests {
         let f2 = plugin2.frame(v2);
         link2.receive(&f2, 90.02);
         for i in 0..5 {
-            link2.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: i as f64 / 10.0 }, 90.1 + i as f64 * 0.0001);
+            link2.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: i as f64 / 10.0, takeover: false }, 90.1 + i as f64 * 0.0001);
         }
         assert_eq!(link2.queued_motion(), 3);
         assert_eq!(link2.stats.ctl_overflow, 2);

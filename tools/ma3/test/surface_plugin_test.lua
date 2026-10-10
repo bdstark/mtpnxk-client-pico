@@ -490,7 +490,7 @@ do
     return a and a.ok == 0 and a.code == "control-disabled" end)())
   check("control=bogus is refused", select(2, state._parseArgument("key=" .. KEYHEX .. " control=bogus")) ~= nil)
   reset("key=" .. KEYHEX .. " input=fake control=fake")
-  check("control=fake enables the module on its fake backend", state.controlEnabled == true and state.controlMode == "fake" and state.modules.control.version == "0.2.0" and findLog("control enabled on the fake backend"), lastLog())
+  check("control=fake enables the module on its fake backend", state.controlEnabled == true and state.controlMode == "fake" and state.modules.control.version == "0.3.0" and findLog("control enabled on the fake backend"), lastLog())
   push({ t = "hello", v = 1, id = "nxk-c1", gen = 7, nonce = "c1c1c1c1c1c1c1c1", surface = "nxk", fw = "0.1.0" }); tick()
   local w = ofType(drain(), "welcome")[1]
   check("the welcome announces control 1 on the fake backend and the control session is open", w and w.control == 1 and w.controlBackend == "fake" and state.sessions[w.sid].controlOpen == true, J(w))
@@ -623,9 +623,33 @@ do
   check("kb19: a rotary push is refused unsupported on the console backend (nothing pressed, no gesture owned)", a and a.ok == 0 and a.code == "unsupported" and state.modules.control.instance:admission(clock.t + 1) == nil, J(a))
   send(ctl(44, "abs", { es = 5, v = 0.5, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 4 })); tick()
   a = ackOf()
-  check("kb19: a strip position is refused unsupported on the console backend (KB-20/22)", a and a.ok == 0 and a.code == "unsupported", J(a))
+  check("kb19: a position on an executor fader is refused unsupported on the console backend (KB-21/22)", a and a.ok == 0 and a.code == "unsupported", J(a))
   Main(nil, "status"); Cleanup()
   check("kb19: status names the console backend", findLog("control: enabled backend=console") ~= nil, lastLog())
+  -- KB-20: the M-Touch strips. A touch on a slot is a hold, the drag inside it the KB-19 adjustment, a position At <value>.
+  local function strip(ev, k, extra) extra.dev = "mtouch"; extra.c = "Strip1"; extra.tgt = extra.tgt or { slot = 1 }; extra.gs = extra.gs or 7; return ctl(ev, k, extra) end
+  cmdsBefore = #pool.cmds
+  send(strip(60, "touch", { es = 6, d = 1 })); tick()
+  a = ackOf(); tick()
+  local adm = state.modules.control.instance:admission(clock.t)
+  local held = false
+  for _, sess in pairs(state.modules.control.instance:status(clock.t).sessions) do for _, g in ipairs(sess.gestureList or {}) do if g.kind == "touch" and g.device == "mtouch" and g.control == "Strip1" then held = true end end end
+  check("kb20: a strip touch on slot 1 is admitted as a hold (the control instance is busy, the touch is a gesture of the session, no command issued)", a and a.ok == 1 and adm and adm.code == "busy" and held and #pool.cmds == cmdsBefore, J({ a, adm }))
+  send(strip(61, "rel", { es = 7, dx = 3 })); tick(); tick()
+  check("kb20: the drag inside the touch is the KB-19 adjustment (At + 3)", lastCmd('^Attribute "Dimmer" At %+ 3$') ~= nil and #pool.cmds == cmdsBefore + 1, pool.cmds[#pool.cmds])
+  send(strip(62, "abs", { es = 8, v = 0.25 })); tick(); tick()
+  check("kb20: a strip position on a Percent slot is Attribute \"Dimmer\" At 25", lastCmd('^Attribute "Dimmer" At 25$') ~= nil, pool.cmds[#pool.cmds])
+  send(strip(63, "abs", { es = 9, v = 0.1, c = "Strip2", tgt = { slot = 2 }, gs = 8 })); tick(); tick()
+  check("kb20: a position on a Physical slot is placed in physical units (Pan -225..225 at 0.1: At -180)", lastCmd('^Attribute "Pan" At %-180$') ~= nil, pool.cmds[#pool.cmds])
+  send(strip(64, "abs", { es = 10, v = 0.6, tk = 1 })); tick()
+  a = ackOf(); tick()
+  check("kb20: tk = 1 (takeover) is carried to the module and the position placed (At 60)", a and a.ok == 1 and lastCmd('^Attribute "Dimmer" At 60$') ~= nil, J(a))
+  local rejBefore = state.counters.rejected
+  send(strip(65, "abs", { es = 11, v = 0.6, tk = 2 })); send(strip(66, "rel", { es = 11, dx = 1, tk = 1 })); tick()
+  check("kb20: a tk other than 0/1, or tk on a non-position, is rejected before the module", state.counters.rejected == rejBefore + 2 and #ofType(drain(), "ack") == 0, state.counters.rejected - rejBefore)
+  send(strip(67, "touch", { es = 11, d = 0 })); tick()
+  a = ackOf(); tick()
+  check("kb20: the lift is a boundary; the hold is gone and nothing else was issued", a and a.ok == 1 and a.boundary == 1 and state.modules.control.instance:admission(clock.t + 1) == nil and #pool.cmds == cmdsBefore + 4, J(a))
   pool.cmds = {}  -- the later input=mixed checks expect no recorded console command
   reset("key=" .. KEYHEX .. " input=fake control=fake")
   push({ t = "hello", v = 1, id = "nxk-c6", gen = 12, nonce = "c6c6c6c6c6c6c6c6", surface = "nxk", fw = "0.1.0" }); tick()
