@@ -8,7 +8,7 @@ key routes, ownership and leases, read-only state readers. The surface plugin
 
 | Component | Version | Module API | Copied from |
 | --- | --- | --- | --- |
-| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `d089a87` (branch `feat/kb17-context-snapshot`; unchanged since `3960334`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
+| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `c8dbb3a` (branch `feat/kb17-context-snapshot`; unchanged since `3960334`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
 | `gma3_mcp_feedback` | 0.3.0 | 1 | `d089a87` (KB-17: control-context readers, `contextSnapshot()`/`watchContext()` with the binding generation incl. the whole selection identity and every configured function); sha256 `0e9895a278537422a7dc5f99857fbca736074bfbb60f3839244b581fe6f0d0f4` |
 
 Previous pins: hardkeys 0.10.0 / feedback 0.2.0 at `3960334` (KB-15); hardkeys 0.5.0 `d73a8e10…` (PR #12, `6e0d9c1`), used by the KB-07/KB-08 records.
