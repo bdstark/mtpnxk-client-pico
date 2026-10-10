@@ -244,8 +244,10 @@ live record `docs/probes/kb-17-context-macos-2.5.1.md` there, 31/31). This repos
   carry the module's reason, and while a part is unobserved `known = 0` and no generation is claimed;
 - the welcome carries `context: 1`; `status` counts `contexts`.
 - the Rust service parses the message (`FromPlugin::Context`), keeps the last one as data (`Link.context`), counts
-  received contexts and generation moves and logs each move with bank/page/context and the slot/executor counts
-  (`cargo test`: 37, one new).
+  received contexts and generation moves and logs each move with bank/page/context and the slot/executor counts.
+  The context is dropped on link down, re-pairing and every new welcome, and `Link::context_view(now)` presents one
+  only while paired with the link up, received in this pairing within `state_stale` and marked known by the plugin
+  (`cargo test`: 38, two new).
 
 Harness: 159 checks (8 new: the watch list, the message after the parts are observed with the missing encoder bar
 explicit, cadence, an executor-page change moving the generation in the frame it is observed, back again, a show

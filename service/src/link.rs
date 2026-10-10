@@ -219,6 +219,17 @@ impl Link {
         ConsoleView { fresh, paired, link_up: self.link_up, items: if fresh { Some(&self.console.items) } else { None } }
     }
 
+    /// The control context (KB-17) as something a consumer may act on: only while paired with the link up,
+    /// only a context received in this pairing within `state_stale`, and only one the plugin marked known.
+    /// Anything else is `None`: a stale or previous-pairing context is never presented as current.
+    pub fn context_view(&self, now: f64) -> Option<&ConsoleContext> {
+        let fresh = self.session().is_some() && self.link_up;
+        match &self.context {
+            Some(c) if fresh && c.known && now - c.received_at <= self.cfg.state_stale => Some(c),
+            _ => None,
+        }
+    }
+
     pub fn take_outgoing(&mut self) -> Vec<Vec<u8>> {
         std::mem::take(&mut self.outgoing)
     }
@@ -335,11 +346,13 @@ impl Link {
             self.pending.clear();
             self.link_up = false;
             self.console.full_seen = false;
+            self.context = None;
             self.send_hello(now);
             return;
         }
         if silent > self.cfg.watchdog && self.link_up {
             self.link_up = false;
+            self.context = None;
             self.stats.link_downs += 1;
             self.note(format!("link down: no plugin packet for {:.1} s", silent));
         }
@@ -412,6 +425,8 @@ impl Link {
                 self.phase = Phase::Paired(Session { sid, out_seq: 0, in_seq: seq, lease_ms: lease, hb_ms: hb, plugin_gen: pgen.clone(), keys, modules, input, next_hb: now });
                 self.pending.clear();
                 self.console = ConsoleState { generation: pgen, epoch: epoch.unwrap_or(0), items: BTreeMap::new(), full_seen: false, last_state_at: now };
+                // KB-17 review: a new pairing is a new plugin run; the previous context (and its generation) is gone.
+                self.context = None;
                 self.last_rx = now;
                 self.link_up = true;
             }
@@ -423,6 +438,7 @@ impl Link {
                         self.note("plugin knows no session for our sid (plugin restarted or forgot us): pairing again".into());
                         self.pending.clear();
                         self.link_up = false;
+                        self.context = None;
                         self.console.full_seen = false;
                         self.send_hello(now);
                     }
@@ -819,6 +835,44 @@ mod tests {
         assert_eq!(link.context.as_ref().unwrap().generation, Some(2));
         assert_eq!(link.stats.context_generations, 3);
         assert!(link.log.iter().any(|l| l.contains("context generation 2") && l.contains("Color")), "{:?}", link.log);
+    }
+
+    #[test]
+    fn context_is_dropped_on_link_down_repair_and_a_new_pairing_until_a_fresh_one_arrives() {
+        let (mut link, mut plugin) = pair(0.0);
+        let known = plugin.context(1, 1, Some(5), json!({"bank":4,"bankName":"Color","page":1,"pageName":"RGB","ctx":"Default","attr":1}));
+        link.receive(&known, 0.1);
+        assert_eq!(link.context_view(0.2).unwrap().generation, Some(5));
+        // Stale by age: not presented, though still stored.
+        assert!(link.context_view(2.0).is_none());
+        // Watchdog: link down drops it.
+        link.tick(2.5);
+        assert!(!link.link_up);
+        assert!(link.context.is_none());
+        let hb = plugin.frame(json!({"t":"hb","held":[]}));
+        link.receive(&hb, 2.6);
+        assert!(link.link_up);
+        assert!(link.context_view(2.6).is_none(), "the link is back but no context arrived in it");
+        // Silence past repair_after: unpaired, nothing kept.
+        link.tick(7.0);
+        assert!(link.session().is_none());
+        assert!(link.context.is_none());
+        // A new pairing (a new plugin run with its own generations) starts without a context.
+        let out = plugin.decode(link.take_outgoing());
+        let nonce = out.iter().find(|p| p["t"] == "hello").unwrap()["nonce"].as_str().unwrap().to_string();
+        plugin.generation = "2-deadbeef".into();
+        let w = plugin.welcome(&nonce);
+        link.receive(&w, 7.1);
+        assert!(link.session().is_some());
+        assert!(link.context.is_none() && link.context_view(7.1).is_none());
+        let fresh = plugin.context(1, 1, Some(1), json!({"bank":1,"bankName":"Dimmer","page":1,"pageName":"Dimmer","ctx":"Default","attr":1}));
+        link.receive(&fresh, 7.2);
+        let c = link.context_view(7.3).unwrap();
+        assert_eq!((c.generation, c.plugin_generation.as_str()), (Some(1), "2-deadbeef"));
+        // A context the plugin marks unknown is stored but never presented.
+        let unknown = plugin.context(1, 0, None, json!({"why":"not observed"}));
+        link.receive(&unknown, 7.4);
+        assert!(link.context.is_some() && link.context_view(7.4).is_none());
     }
 
 }
