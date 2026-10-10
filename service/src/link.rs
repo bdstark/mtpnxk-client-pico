@@ -4,7 +4,7 @@
 //! and sends what `take_outgoing()` returns.
 
 use crate::auth::{self, Key, MAX_FROM_PLUGIN};
-use crate::protocol::{FromPlugin, KeyReport, ToPlugin, PROTOCOL_VERSION};
+use crate::protocol::{CtlTarget, FromPlugin, KeyReport, ToPlugin, PROTOCOL_VERSION};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,6 +24,16 @@ pub struct Config {
     pub retransmit_spacing: f64,
     /// No `state` for this long: console state unknown.
     pub state_stale: f64,
+    /// KB-18: queued motion older than this is dropped, never sent late.
+    pub motion_max_age: f64,
+    /// KB-18: at most one motion packet per control per this interval; deltas merge in between.
+    pub motion_min_interval: f64,
+    /// KB-18: motion packets sent per tick.
+    pub ctl_per_tick: usize,
+    /// KB-18: a relative gesture without a touch ends after this idle time (the next delta is a new gesture).
+    pub gesture_idle: f64,
+    /// KB-18: queued motion entries per control; beyond it the oldest entry of that control is dropped.
+    pub motion_per_control: usize,
 }
 
 impl Default for Config {
@@ -38,6 +48,11 @@ impl Default for Config {
             retransmits: 4,
             retransmit_spacing: 0.06, // measured ack round trip on onPC: median 35 ms, p99 50 ms
             state_stale: 1.5,
+            motion_max_age: 0.25,
+            motion_min_interval: 0.005,
+            ctl_per_tick: 16,
+            gesture_idle: 0.3,
+            motion_per_control: 64,
         }
     }
 }
@@ -65,11 +80,80 @@ pub struct Stats {
     pub context_generations: u64,
     pub link_downs: u64,
     pub no_session: u64,
+    /// KB-18 continuous control: events from the surface, packets sent, deltas merged before sending,
+    /// events dropped for want of a binding generation, for age, for a moved generation, or because the
+    /// plugin admits no control; refusals and the loss the plugin reported back; presses superseded by
+    /// their release before an ack.
+    pub ctl_events: u64,
+    pub ctl_sent: u64,
+    pub ctl_coalesced: u64,
+    pub ctl_unbound: u64,
+    pub ctl_aged: u64,
+    pub ctl_stale: u64,
+    pub ctl_unsupported: u64,
+    pub ctl_refused: u64,
+    pub ctl_lost_reported: u64,
+    pub ctl_superseded: u64,
+    /// Positions dropped because a control's motion queue overflowed (stateful targets keep every position).
+    pub ctl_overflow: u64,
+}
+
+/// Fader functions whose value path matters (the same set as the console module's STATEFUL_FUNCTIONS):
+/// a queued position of such a target is never replaced by a newer one here.
+const STATEFUL_FUNCTIONS: [&str; 7] = ["x", "xa", "xb", "crossfade", "crossfadea", "crossfadeb", "temp"];
+
+/// KB-18: what a surface control did. `Abs` and `Touch` are produced by the M-Touch strips once KB-20
+/// wires them into the link; the transport treats them now (tests), the NX-K produces `Rel` and `Btn`.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CtlKind {
+    /// Encoder motion in detents; `fine` is the surface's explicit fine-adjustment modifier.
+    Rel { dx: i32, fine: bool },
+    /// A strip or fader position, 0..1 of its travel.
+    Abs { v: f64 },
+    Touch { down: bool },
+    Btn { down: bool },
+}
+
+/// A touch or button event awaiting its acknowledgment (retransmitted like a key).
+#[derive(Debug, Clone)]
+struct CtlBoundary {
+    k: &'static str,
+    dev: String,
+    c: String,
+    es: u64,
+    cg: Option<u64>,
+    gs: u64,
+    tgt: CtlTarget,
+    d: u8,
+}
+
+/// Motion waiting to be sent: deltas of one control, generation and gesture merge into it.
+#[derive(Debug, Clone)]
+struct Motion {
+    dev: String,
+    c: String,
+    tgt: CtlTarget,
+    cg: u64,
+    gs: u64,
+    fine: bool,
+    dx: i32,
+    v: Option<f64>,
+    first_at: f64,
+    events: u32,
+}
+
+#[derive(Debug, Clone)]
+struct Gesture {
+    id: u64,
+    touching: bool,
+    last_at: f64,
 }
 
 #[derive(Debug, Clone)]
 enum PendingKind {
     Key { k: &'static str, d: u8 },
+    Ctl(CtlBoundary),
 }
 
 #[derive(Debug, Clone)]
@@ -92,6 +176,9 @@ pub struct Session {
     pub keys: KeyReport,
     pub modules: BTreeMap<String, String>,
     pub input: Option<String>,
+    /// KB-18: the plugin admits `ctl` events (control=fake|...); otherwise they are dropped here.
+    pub control: bool,
+    pub control_backend: Option<String>,
     next_hb: f64,
 }
 
@@ -163,6 +250,12 @@ pub struct Link {
     pub effect_ms: Vec<i64>,
     pub refusals: Vec<Refusal>,
     pub log: Vec<String>,
+    /// KB-18: per-device event sequence (next value), gestures per control, queued motion.
+    es_next: BTreeMap<String, u64>,
+    gestures: BTreeMap<(String, String), Gesture>,
+    gs_next: u64,
+    motion: Vec<Motion>,
+    last_flush: BTreeMap<(String, String), f64>,
 }
 
 fn nonce() -> String {
@@ -191,7 +284,17 @@ impl Link {
             effect_ms: Vec::new(),
             refusals: Vec::new(),
             log: Vec::new(),
+            es_next: BTreeMap::new(),
+            gestures: BTreeMap::new(),
+            gs_next: 1,
+            motion: Vec::new(),
+            last_flush: BTreeMap::new(),
         }
+    }
+
+    /// KB-18: motion waiting to be sent (merged deltas and positions).
+    pub fn queued_motion(&self) -> usize {
+        self.motion.len()
     }
 
     pub fn phase(&self) -> &Phase {
@@ -280,9 +383,241 @@ impl Link {
 
     fn send_pending(&mut self, p: &Pending) -> bool {
         let ev = p.ev;
-        match p.kind {
-            PendingKind::Key { k, d } => self.send_session(|sid, seq| serde_json::to_string(&ToPlugin::Key { sid, seq, ev, k, d }).expect("key serialises")),
+        match &p.kind {
+            PendingKind::Key { k, d } => {
+                let (k, d) = (*k, *d);
+                self.send_session(|sid, seq| serde_json::to_string(&ToPlugin::Key { sid, seq, ev, k, d }).expect("key serialises"))
+            }
+            PendingKind::Ctl(b) => {
+                let b = b.clone();
+                self.send_session(|sid, seq| {
+                    serde_json::to_string(&ToPlugin::Ctl { sid, seq, ev, k: b.k, dev: &b.dev, c: &b.c, es: b.es, cg: b.cg, gs: Some(b.gs), tgt: b.tgt, dx: None, v: None, d: Some(b.d), fine: None }).expect("ctl serialises")
+                })
+            }
         }
+    }
+
+    fn next_es(&mut self, dev: &str) -> u64 {
+        let e = self.es_next.entry(dev.to_string()).or_insert(1);
+        let v = *e;
+        *e += 1;
+        v
+    }
+
+    fn current_generation(&self, now: f64) -> Option<u64> {
+        self.context_view(now).and_then(|c| c.generation)
+    }
+
+    /// Whether a newer position may replace a queued one for this target (review 7): an encoder slot or an
+    /// executor whose configured fader function the context reports as stateless. Unknown means no: every
+    /// position is kept and the plugin decides.
+    fn position_supersedes(&self, tgt: &CtlTarget, now: f64) -> bool {
+        match tgt {
+            CtlTarget::Slot { .. } => true,
+            CtlTarget::Executor { ex, el } => {
+                if *el != "fader" {
+                    return false;
+                }
+                let Some(ctx) = self.context_view(now) else { return false };
+                let Some(exs) = ctx.body.get("ex").and_then(|v| v.as_array()) else { return false };
+                let Some(x) = exs.iter().find(|x| x.get("n").and_then(|n| n.as_u64()) == Some(*ex as u64)) else { return false };
+                let tok = x.get("tok").and_then(|t| t.as_str()).or_else(|| x.get("fd").and_then(|t| t.as_str()));
+                match tok {
+                    Some(t) => {
+                        let t = t.trim_start_matches("Fader").trim_start_matches("fader").to_ascii_lowercase();
+                        !t.is_empty() && !STATEFUL_FUNCTIONS.contains(&t.as_str())
+                    }
+                    None => false,
+                }
+            }
+        }
+    }
+
+    /// KB-18: a surface control moved, was touched or pressed. Motion and positions are queued and merged
+    /// until `tick` sends them (one packet per control per `motion_min_interval`, dropped after
+    /// `motion_max_age` or when the binding generation moved: never sent late, never reinterpreted).
+    /// Touches and buttons are boundaries: the control's queued motion is sent first, then the boundary,
+    /// which is retransmitted like a key until acknowledged. A release stops the retransmission of the
+    /// press it ends. Motion and downs need the current binding generation from the plugin's context;
+    /// without one they are dropped and counted (`ctl_unbound`). A release is always sent.
+    pub fn control_event(&mut self, dev: &str, c: &str, tgt: CtlTarget, kind: CtlKind, now: f64) {
+        self.stats.ctl_events += 1;
+        let Some(session) = self.session() else {
+            self.stats.dropped_unpaired += 1;
+            return;
+        };
+        if !session.control {
+            self.stats.ctl_unsupported += 1;
+            return;
+        }
+        let key = (dev.to_string(), c.to_string());
+        let cg = self.current_generation(now);
+        match kind {
+            CtlKind::Rel { dx, fine } => {
+                if dx == 0 {
+                    return;
+                }
+                let Some(cg) = cg else {
+                    self.stats.ctl_unbound += 1;
+                    return;
+                };
+                let gs = {
+                    let idle = self.cfg.gesture_idle;
+                    let gs_next = &mut self.gs_next;
+                    let g = self.gestures.entry(key.clone()).or_insert_with(|| { let id = *gs_next; *gs_next += 1; Gesture { id, touching: false, last_at: now } });
+                    if !g.touching && now - g.last_at > idle {
+                        g.id = *gs_next;
+                        *gs_next += 1;
+                    }
+                    g.last_at = now;
+                    g.id
+                };
+                if let Some(m) = self.motion.iter_mut().rev().find(|m| m.dev == dev && m.c == c) {
+                    if m.v.is_none() && m.cg == cg && m.gs == gs && m.fine == fine && m.tgt == tgt {
+                        m.dx += dx;
+                        m.events += 1;
+                        self.stats.ctl_coalesced += 1;
+                        return;
+                    }
+                }
+                self.motion.push(Motion { dev: dev.into(), c: c.into(), tgt, cg, gs, fine, dx, v: None, first_at: now, events: 1 });
+            }
+            CtlKind::Abs { v } => {
+                let Some(cg) = cg else {
+                    self.stats.ctl_unbound += 1;
+                    return;
+                };
+                let gs = {
+                    let gs_next = &mut self.gs_next;
+                    let g = self.gestures.entry(key.clone()).or_insert_with(|| { let id = *gs_next; *gs_next += 1; Gesture { id, touching: false, last_at: now } });
+                    g.last_at = now;
+                    g.id
+                };
+                // A newer position replaces the queued one only where the context says the target's function is
+                // stateless (review 7); crossfades, Temp and unknown targets keep every position in order.
+                if self.position_supersedes(&tgt, now) {
+                    if let Some(m) = self.motion.iter_mut().rev().find(|m| m.dev == dev && m.c == c) {
+                        if m.v.is_some() && m.cg == cg && m.gs == gs && m.tgt == tgt {
+                            m.v = Some(v.clamp(0.0, 1.0));
+                            m.events += 1;
+                            self.stats.ctl_coalesced += 1;
+                            return;
+                        }
+                    }
+                }
+                let queued = self.motion.iter().filter(|m| m.dev == dev && m.c == c).count();
+                if queued >= self.cfg.motion_per_control {
+                    if let Some(i) = self.motion.iter().position(|m| m.dev == dev && m.c == c) {
+                        self.motion.remove(i);
+                        self.stats.ctl_overflow += 1;
+                    }
+                }
+                self.motion.push(Motion { dev: dev.into(), c: c.into(), tgt, cg, gs, fine: false, dx: 0, v: Some(v.clamp(0.0, 1.0)), first_at: now, events: 1 });
+            }
+            CtlKind::Touch { down } | CtlKind::Btn { down } => {
+                let k: &'static str = if matches!(kind, CtlKind::Touch { .. }) { "touch" } else { "btn" };
+                if down && cg.is_none() {
+                    self.stats.ctl_unbound += 1;
+                    return;
+                }
+                // Motion of this control queued before the boundary goes out first, in order.
+                self.flush_control(dev, c, now);
+                let gs = {
+                    let gs_next = &mut self.gs_next;
+                    let g = self.gestures.entry(key.clone()).or_insert_with(|| { let id = *gs_next; *gs_next += 1; Gesture { id, touching: false, last_at: now } });
+                    if down {
+                        g.id = *gs_next;
+                        *gs_next += 1;
+                        g.touching = k == "touch";
+                    } else {
+                        g.touching = false;
+                        // A button up or touch up ends the gesture: the next delta starts a new one.
+                        g.last_at = now - self.cfg.gesture_idle - 1.0;
+                    }
+                    if down { g.last_at = now; }
+                    g.id
+                };
+                if !down {
+                    let before = self.pending.len();
+                    self.pending.retain(|p| !matches!(&p.kind, PendingKind::Ctl(b) if b.d == 1 && b.dev == dev && b.c == c));
+                    let n = (before - self.pending.len()) as u64;
+                    if n > 0 {
+                        self.stats.ctl_superseded += n;
+                        self.note(format!("{k} down on {dev}/{c} never acknowledged before its release: no longer retransmitted"));
+                    }
+                }
+                let es = self.next_es(dev);
+                let ev = self.ev_next;
+                self.ev_next += 1;
+                let b = CtlBoundary { k, dev: dev.into(), c: c.into(), es, cg: if down { cg } else { None }, gs, tgt, d: if down { 1 } else { 0 } };
+                let p = Pending { ev, kind: PendingKind::Ctl(b), first_sent: now, next_at: now + self.cfg.retransmit_spacing, attempts: 1 };
+                self.stats.events += 1;
+                self.stats.ctl_sent += 1;
+                self.send_pending(&p);
+                self.pending.push(p);
+            }
+        }
+    }
+
+    /// Sends one queued motion packet. Never retransmitted.
+    fn send_motion(&mut self, m: &Motion, now: f64) {
+        let es = self.next_es(&m.dev);
+        let ev = self.ev_next;
+        self.ev_next += 1;
+        self.stats.events += 1;
+        self.stats.ctl_sent += 1;
+        let (k, dx, v): (&'static str, Option<i32>, Option<f64>) = if m.v.is_some() { ("abs", None, m.v) } else { ("rel", Some(m.dx.clamp(-4096, 4096)), None) };
+        let fine = if m.fine { Some(1) } else { None };
+        self.send_session(|sid, seq| serde_json::to_string(&ToPlugin::Ctl { sid, seq, ev, k, dev: &m.dev, c: &m.c, es, cg: Some(m.cg), gs: Some(m.gs), tgt: m.tgt, dx, v, d: None, fine }).expect("ctl serialises"));
+        self.last_flush.insert((m.dev.clone(), m.c.clone()), now);
+    }
+
+    /// Sends every queued motion of one control now (before a boundary of that control).
+    fn flush_control(&mut self, dev: &str, c: &str, now: f64) {
+        let cg = self.current_generation(now);
+        let mine: Vec<Motion> = self.motion.iter().filter(|m| m.dev == dev && m.c == c).cloned().collect();
+        self.motion.retain(|m| !(m.dev == dev && m.c == c));
+        for m in mine {
+            if now - m.first_at > self.cfg.motion_max_age {
+                self.stats.ctl_aged += 1;
+            } else if cg != Some(m.cg) {
+                self.stats.ctl_stale += 1;
+            } else {
+                self.send_motion(&m, now);
+            }
+        }
+    }
+
+    /// Bounded, in order, at most one packet per control per `motion_min_interval`: a control whose
+    /// last packet is too recent keeps merging (its later entries wait too, so order holds).
+    fn flush_motion(&mut self, now: f64) {
+        if self.motion.is_empty() {
+            return;
+        }
+        let cg = self.current_generation(now);
+        let mut sent = 0usize;
+        let mut waiting: BTreeSet<(String, String)> = BTreeSet::new();
+        let mut keep: Vec<Motion> = Vec::new();
+        let queue = std::mem::take(&mut self.motion);
+        for m in queue {
+            let key = (m.dev.clone(), m.c.clone());
+            if now - m.first_at > self.cfg.motion_max_age {
+                self.stats.ctl_aged += 1;
+                continue;
+            }
+            if cg != Some(m.cg) {
+                self.stats.ctl_stale += 1;
+                continue;
+            }
+            if waiting.contains(&key) || sent >= self.cfg.ctl_per_tick || self.last_flush.get(&key).map(|t| now - t < self.cfg.motion_min_interval).unwrap_or(false) {
+                waiting.insert(key);
+                keep.push(m);
+                continue;
+            }
+            self.send_motion(&m, now);
+            sent += 1;
+        }
+        self.motion = keep;
     }
 
     /// A physical key went down or up. Events are sent once and retransmitted until acknowledged.
@@ -315,18 +650,6 @@ impl Link {
         self.pending.push(p);
     }
 
-    /// An encoder turn. Never retransmitted.
-    pub fn wheel_event(&mut self, wheel: u8, dx: i32, bank: bool, _now: f64) {
-        if self.session().is_none() {
-            self.stats.dropped_unpaired += 1;
-            return;
-        }
-        let ev = self.ev_next;
-        self.ev_next += 1;
-        self.stats.events += 1;
-        let dx = dx.clamp(-127, 127);
-        self.send_session(|sid, seq| serde_json::to_string(&ToPlugin::Wheel { sid, seq, ev, w: wheel, dx, bank: if bank { 1 } else { 0 } }).expect("wheel serialises"));
-    }
 
     /// Hellos while unpaired, heartbeats, retransmissions and the watchdog.
     pub fn tick(&mut self, now: f64) {
@@ -344,6 +667,8 @@ impl Link {
         if silent > self.cfg.repair_after {
             self.note(format!("no plugin packet for {:.1} s: pairing again", silent));
             self.pending.clear();
+            self.motion.clear();
+            self.gestures.clear();
             self.link_up = false;
             self.console.full_seen = false;
             self.context = None;
@@ -353,6 +678,9 @@ impl Link {
         if silent > self.cfg.watchdog && self.link_up {
             self.link_up = false;
             self.context = None;
+            // Queued motion against a context that is now unknown is never sent.
+            self.stats.ctl_stale += self.motion.len() as u64;
+            self.motion.clear();
             self.stats.link_downs += 1;
             self.note(format!("link down: no plugin packet for {:.1} s", silent));
         }
@@ -379,6 +707,8 @@ impl Link {
                 q.next_at = now + self.cfg.retransmit_spacing;
             }
         }
+        // KB-18: queued motion, bounded per tick.
+        self.flush_motion(now);
     }
 
     /// Closes the session politely (the plugin releases what the surface held).
@@ -406,7 +736,7 @@ impl Link {
             }
         };
         match pkt {
-            FromPlugin::Welcome { v, sid, nonce: n, generation: pgen, lease, hb, keys, modules, input, seq, epoch, .. } => {
+            FromPlugin::Welcome { v, sid, nonce: n, generation: pgen, lease, hb, keys, modules, input, seq, epoch, control, control_backend, .. } => {
                 let expected = match &self.phase {
                     Phase::Unpaired { nonce: Some(x), .. } => x.clone(),
                     _ => {
@@ -421,9 +751,13 @@ impl Link {
                     return;
                 }
                 self.stats.welcomes += 1;
-                self.note(format!("paired: sid {sid}, plugin gen {pgen}, lease {lease} ms, hb {hb} ms, {} keys ok, {} unsupported, input {:?}", keys.ok.len(), keys.unsupported.len(), input));
-                self.phase = Phase::Paired(Session { sid, out_seq: 0, in_seq: seq, lease_ms: lease, hb_ms: hb, plugin_gen: pgen.clone(), keys, modules, input, next_hb: now });
+                let control = control == Some(1);
+                self.note(format!("paired: sid {sid}, plugin gen {pgen}, lease {lease} ms, hb {hb} ms, {} keys ok, {} unsupported, input {:?}, control {}", keys.ok.len(), keys.unsupported.len(), input,
+                    if control { control_backend.clone().unwrap_or_else(|| "on".into()) } else { "off (ctl events are dropped here)".into() }));
+                self.phase = Phase::Paired(Session { sid, out_seq: 0, in_seq: seq, lease_ms: lease, hb_ms: hb, plugin_gen: pgen.clone(), keys, modules, input, control, control_backend, next_hb: now });
                 self.pending.clear();
+                self.motion.clear();
+                self.gestures.clear();
                 self.console = ConsoleState { generation: pgen, epoch: epoch.unwrap_or(0), items: BTreeMap::new(), full_seen: false, last_state_at: now };
                 // KB-17 review: a new pairing is a new plugin run; the previous context (and its generation) is gone.
                 self.context = None;
@@ -446,18 +780,33 @@ impl Link {
                     self.note(format!("plugin error: {e}"));
                 }
             }
-            FromPlugin::Ack { sid, seq, ev, ok, code, why, .. } => {
+            FromPlugin::Ack { sid, seq, ev, ok, code, why, lost, coalesced, cg, .. } => {
                 if !self.admit(&sid, seq, now) {
                     return;
                 }
+                let mut was_ctl = false;
                 if let Some(i) = self.pending.iter().position(|p| p.ev == ev) {
                     let p = self.pending.remove(i);
+                    was_ctl = matches!(p.kind, PendingKind::Ctl(_));
                     self.rtt_ms.push((now - p.first_sent) * 1000.0);
                 }
+                if let Some(n) = lost {
+                    // KB-18: the plugin saw a gap in our per-device sequence: packets were lost on the way.
+                    self.stats.ctl_lost_reported += n;
+                    self.note(format!("event {ev}: the plugin reports {n} lost control packet(s) before it (never replayed)"));
+                }
+                let _ = coalesced;
                 if ok == 1 {
                     self.stats.acked += 1;
                 } else {
                     self.stats.refused += 1;
+                    let is_ctl = was_ctl || lost.is_some() || cg.is_some() || matches!(code.as_deref(), Some("stale-generation" | "binding-unknown" | "target-unavailable" | "out-of-order" | "conflict" | "control-disabled" | "gesture-rebound" | "queue-full" | "rate"));
+                    if is_ctl {
+                        self.stats.ctl_refused += 1;
+                    }
+                    if let (Some("stale-generation"), Some(g)) = (code.as_deref(), cg) {
+                        self.note(format!("event {ev}: the plugin's binding generation is {g}; our context lags (events against it are refused until the next context message)"));
+                    }
                     let r = Refusal { ev, code: code.unwrap_or_default(), why: why.unwrap_or_default() };
                     self.note(format!("event {} refused [{}] {}", r.ev, r.code, r.why));
                     self.refusals.push(r);
@@ -601,9 +950,19 @@ mod tests {
             auth::frame(&self.key, &v.to_string())
         }
         fn welcome(&mut self, nonce: &str) -> Vec<u8> {
-            let v = json!({"t":"welcome","v":1,"sid":self.sid,"nonce":nonce,"gen":self.generation,"lease":2000,"hb":250,"keys":{"ok":["Record","5"],"unsupported":["Bank"]},"modules":{"gma3_mcp_hardkeys":"0.5.0"},"input":"keyboard","epoch":1,"seq":0});
+            let v = json!({"t":"welcome","v":1,"sid":self.sid,"nonce":nonce,"gen":self.generation,"lease":2000,"hb":250,"keys":{"ok":["Record","5"],"unsupported":["Bank"]},"modules":{"gma3_mcp_hardkeys":"0.5.0"},"input":"keyboard","epoch":1,"control":1,"controlBackend":"fake","seq":0});
             self.seq = 0;
             auth::frame(&self.key, &v.to_string())
+        }
+        fn welcome_without_control(&mut self, nonce: &str) -> Vec<u8> {
+            let v = json!({"t":"welcome","v":1,"sid":self.sid,"nonce":nonce,"gen":self.generation,"lease":2000,"hb":250,"keys":{"ok":["Record"],"unsupported":[]},"input":"keyboard","epoch":1,"seq":0});
+            self.seq = 0;
+            auth::frame(&self.key, &v.to_string())
+        }
+        fn ctl_ack(&mut self, ev: u64, ok: bool, extra: Value) -> Vec<u8> {
+            let mut v = json!({"t":"ack","ev":ev,"ok":if ok {1} else {0}});
+            if let Value::Object(m) = extra { for (k, x) in m { v[k] = x; } }
+            self.frame(v)
         }
         fn ack(&mut self, ev: u64, ok: bool) -> Vec<u8> {
             self.frame(json!({"t":"ack","ev":ev,"ok":if ok {1} else {0},"code":if ok {Value::Null} else {json!("unsupported")},"why":"nope"}))
@@ -875,4 +1234,249 @@ mod tests {
         assert!(link.context.is_some() && link.context_view(7.4).is_none());
     }
 
+    // ---- KB-18: continuous-control transport ----
+
+    fn slot(n: u8) -> CtlTarget { CtlTarget::Slot { slot: n } }
+    fn ctl_packets(v: &[Value]) -> Vec<&Value> { v.iter().filter(|p| p["t"] == "ctl").collect() }
+
+    #[test]
+    fn control_events_need_a_known_binding_generation_and_carry_it() {
+        let (mut link, mut plugin) = pair(10.0);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 2, fine: false }, 10.1);
+        link.tick(10.11);
+        assert!(ctl_packets(&plugin.decode(link.take_outgoing())).is_empty(), "no context yet: nothing sent");
+        assert_eq!(link.stats.ctl_unbound, 1);
+        // An unknown context (known 0) binds nothing either.
+        link.receive(&plugin.context(1, 0, None, json!({"why":"not observed"})), 10.2);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Btn { down: true }, 10.21);
+        assert_eq!(link.stats.ctl_unbound, 2);
+        link.receive(&plugin.context(1, 1, Some(3), json!({"bank":1})), 10.3);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 2, fine: false }, 10.31);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: -1, fine: false }, 10.312);
+        link.control_event("nxk", "Rotary2", slot(2), CtlKind::Rel { dx: 5, fine: true }, 10.313);
+        assert_eq!(link.queued_motion(), 2);
+        assert_eq!(link.stats.ctl_coalesced, 1);
+        link.tick(10.32);
+        let out = plugin.decode(link.take_outgoing());
+        let c = ctl_packets(&out);
+        assert_eq!(c.len(), 2, "{out:?}");
+        assert_eq!(c[0]["k"], "rel"); assert_eq!(c[0]["dev"], "nxk"); assert_eq!(c[0]["c"], "Rotary1"); assert_eq!(c[0]["dx"], 1); assert_eq!(c[0]["cg"], 3); assert_eq!(c[0]["es"], 1); assert_eq!(c[0]["tgt"]["slot"], 1); assert!(c[0]["fine"].is_null());
+        assert_eq!(c[1]["c"], "Rotary2"); assert_eq!(c[1]["dx"], 5); assert_eq!(c[1]["fine"], 1); assert_eq!(c[1]["es"], 2, "one sequence per device");
+        assert_ne!(c[0]["gs"], c[1]["gs"], "each control has its own gesture");
+        assert_eq!(link.stats.ctl_sent, 2);
+        // Motion is never retransmitted.
+        link.tick(10.5); link.tick(10.6);
+        assert!(ctl_packets(&plugin.decode(link.take_outgoing())).is_empty());
+        assert_eq!(link.pending_count(), 0);
+    }
+
+    #[test]
+    fn motion_is_rate_bounded_per_control_merging_meanwhile_and_a_new_gesture_starts_after_idle() {
+        let (mut link, mut plugin) = pair(20.0);
+        link.receive(&plugin.context(1, 1, Some(1), json!({})), 20.0);
+        for i in 0..10 {
+            link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 20.0 + i as f64 * 0.0004);
+            link.tick(20.0 + i as f64 * 0.0004);
+        }
+        let out = plugin.decode(link.take_outgoing());
+        let c = ctl_packets(&out);
+        // The first delta goes out at once; the next nine (within 5 ms of it) merge into one packet.
+        assert_eq!(c.len(), 1, "{out:?}");
+        assert_eq!(c[0]["dx"], 1);
+        assert_eq!(link.queued_motion(), 1);
+        link.tick(20.006);
+        let c2: Vec<Value> = plugin.decode(link.take_outgoing());
+        let c2 = ctl_packets(&c2);
+        assert_eq!(c2.len(), 1);
+        assert_eq!(c2[0]["dx"], 9);
+        assert_eq!(c2[0]["gs"], c[0]["gs"], "same gesture");
+        assert_eq!(c2[0]["es"], 2);
+        // After the idle time the next delta is a new gesture.
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 20.5);
+        link.tick(20.5);
+        let c3: Vec<Value> = plugin.decode(link.take_outgoing());
+        let c3 = ctl_packets(&c3);
+        assert_ne!(c3[0]["gs"], c[0]["gs"]);
+    }
+
+    #[test]
+    fn stale_or_old_motion_is_dropped_instead_of_sent_late() {
+        let (mut link, mut plugin) = pair(30.0);
+        link.receive(&plugin.context(1, 1, Some(1), json!({})), 30.0);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 3, fine: false }, 30.0);
+        // The generation moves before the tick sends it: the delta was produced against generation 1.
+        link.receive(&plugin.context(1, 1, Some(2), json!({})), 30.001);
+        link.tick(30.002);
+        assert!(ctl_packets(&plugin.decode(link.take_outgoing())).is_empty());
+        assert_eq!(link.stats.ctl_stale, 1);
+        assert_eq!(link.queued_motion(), 0);
+        // A delta that could not be sent within motion_max_age is dropped.
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 3, fine: false }, 30.1);
+        link.tick(30.1);
+        plugin.decode(link.take_outgoing());
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 30.102); // merges, waits for the rate interval
+        link.tick(30.4); // but the tick comes too late
+        assert!(ctl_packets(&plugin.decode(link.take_outgoing())).is_empty());
+        assert_eq!(link.stats.ctl_aged, 1);
+        // Link down discards queued motion too.
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 30.5);
+        link.tick(32.1); // watchdog
+        assert!(!link.link_up);
+        assert_eq!(link.queued_motion(), 0);
+        assert_eq!(link.stats.ctl_stale, 2);
+    }
+
+    #[test]
+    fn touch_and_button_boundaries_are_retransmitted_and_a_release_supersedes_the_press_after_flushing_motion() {
+        let (mut link, mut plugin) = pair(40.0);
+        link.receive(&plugin.context(1, 1, Some(1), json!({})), 40.0);
+        let exec = CtlTarget::Executor { ex: 201, el: "fader" };
+        // The context says executor 201's fader is a Master: a newer position may replace a queued one.
+        let mut v = json!({"t":"context","gen":plugin.generation,"epoch":1,"known":1,"cg":1,"enc":{},"slots":[],"page":1,"pool":"Default","display":1,
+                           "ex":[{"n":201,"empty":0,"tgt":1,"fd":"Master","tok":"FaderMaster"},{"n":202,"empty":0,"tgt":1,"fd":"X","tok":"FaderX"}]});
+        v["sid"] = json!(plugin.sid);
+        let f = plugin.frame(v);
+        link.receive(&f, 40.0);
+        link.control_event("mtouch", "Strip1", exec, CtlKind::Touch { down: true }, 40.0);
+        link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.25 }, 40.001);
+        link.control_event("mtouch", "Strip1", exec, CtlKind::Abs { v: 0.5 }, 40.002);
+        link.control_event("mtouch", "Strip1", exec, CtlKind::Touch { down: false }, 40.003);
+        let out = plugin.decode(link.take_outgoing());
+        let c = ctl_packets(&out);
+        assert_eq!(c.len(), 3, "{out:?}");
+        assert_eq!(c[0]["k"], "touch"); assert_eq!(c[0]["d"], 1); assert_eq!(c[0]["cg"], 1); assert_eq!(c[0]["es"], 1); assert_eq!(c[0]["tgt"]["ex"], 201); assert_eq!(c[0]["tgt"]["el"], "fader");
+        assert_eq!(c[1]["k"], "abs"); assert_eq!(c[1]["v"], 0.5); assert_eq!(c[1]["es"], 2); assert_eq!(c[1]["gs"], c[0]["gs"], "the position belongs to the touch's gesture");
+        assert_eq!(c[2]["k"], "touch"); assert_eq!(c[2]["d"], 0); assert!(c[2]["cg"].is_null(), "a release carries no generation"); assert_eq!(c[2]["es"], 3);
+        assert_eq!(link.stats.ctl_coalesced, 1);
+        // The press was never acknowledged: its release superseded it, only the release is pending.
+        assert_eq!(link.pending_count(), 1);
+        assert_eq!(link.stats.ctl_superseded, 1);
+        let rel_ev = c[2]["ev"].as_u64().unwrap();
+        link.tick(40.07);
+        let again = plugin.decode(link.take_outgoing());
+        let again = ctl_packets(&again);
+        assert_eq!(again.len(), 1); assert_eq!(again[0]["ev"], rel_ev); assert_eq!(again[0]["es"], 3, "a retransmission keeps its sequence");
+        link.receive(&plugin.ctl_ack(rel_ev, true, json!({"boundary":1})), 40.08);
+        assert_eq!(link.pending_count(), 0);
+        assert_eq!(link.stats.acked, 1);
+        // A button on a rotary: the next delta after it is a new gesture.
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 40.2);
+        link.tick(40.2);
+        let g1 = ctl_packets(&plugin.decode(link.take_outgoing()))[0]["gs"].clone();
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Btn { down: true }, 40.21);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Btn { down: false }, 40.22);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 40.23);
+        link.tick(40.23);
+        let out = plugin.decode(link.take_outgoing());
+        let c = ctl_packets(&out);
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[0]["k"], "btn"); assert_eq!(c[2]["k"], "rel");
+        assert_ne!(c[2]["gs"], g1, "a button is a boundary: a new gesture");
+    }
+
+    #[test]
+    fn ack_loss_reports_and_control_refusals_are_counted() {
+        let (mut link, mut plugin) = pair(50.0);
+        link.receive(&plugin.context(1, 1, Some(4), json!({})), 50.0);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 50.0);
+        link.tick(50.0);
+        let ev = ctl_packets(&plugin.decode(link.take_outgoing()))[0]["ev"].as_u64().unwrap();
+        link.receive(&plugin.ctl_ack(ev, true, json!({"queued":1,"lost":2})), 50.03);
+        assert_eq!(link.stats.ctl_lost_reported, 2);
+        assert_eq!(link.stats.acked, 1);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 50.1);
+        link.tick(50.1);
+        let ev2 = ctl_packets(&plugin.decode(link.take_outgoing()))[0]["ev"].as_u64().unwrap();
+        link.receive(&plugin.ctl_ack(ev2, false, json!({"code":"stale-generation","why":"event generation 4 is not 5","cg":5})), 50.13);
+        assert_eq!(link.stats.ctl_refused, 1);
+        assert_eq!(link.stats.refused, 1);
+        assert!(link.log.iter().any(|l| l.contains("binding generation is 5")), "{:?}", link.log);
+    }
+
+    #[test]
+    fn a_plugin_without_control_drops_ctl_events_and_a_repair_clears_gestures() {
+        let key = Key::from_hex(&"0123456789abcdef".repeat(4)).unwrap();
+        let mut link = Link::new(Config { id: "nxk-test".into(), ..Config::default() }, key.clone(), 60.0);
+        let mut plugin = FakePlugin::new(key);
+        link.tick(60.0);
+        let hello = plugin.decode(link.take_outgoing());
+        let nonce = hello[0]["nonce"].as_str().unwrap().to_string();
+        link.receive(&plugin.welcome_without_control(&nonce), 60.01);
+        assert!(link.session().is_some() && !link.session().unwrap().control);
+        link.receive(&plugin.context(1, 1, Some(1), json!({})), 60.02);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 60.03);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Btn { down: true }, 60.04);
+        link.tick(60.05);
+        assert!(ctl_packets(&plugin.decode(link.take_outgoing())).is_empty());
+        assert_eq!(link.stats.ctl_unsupported, 2);
+        // A repair (no plugin packets) clears pending boundaries, motion and gestures.
+        let (mut link, mut plugin) = pair(70.0);
+        link.receive(&plugin.context(1, 1, Some(1), json!({})), 70.0);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Btn { down: true }, 70.01);
+        link.control_event("nxk", "Rotary1", slot(1), CtlKind::Rel { dx: 1, fine: false }, 70.02);
+        plugin.decode(link.take_outgoing());
+        link.tick(74.5);
+        assert_eq!(link.pending_count(), 0);
+        assert_eq!(link.queued_motion(), 0);
+        assert_eq!(plugin.decode(link.take_outgoing()).last().unwrap()["t"], "hello");
+    }
+    #[test]
+    fn positions_of_a_stateful_or_unknown_target_are_all_kept_in_order_and_bounded() {
+        let (mut link, mut plugin) = pair(80.0);
+        let mut v = json!({"t":"context","gen":plugin.generation,"epoch":1,"known":1,"cg":1,"enc":{},"slots":[],"page":1,"pool":"Default","display":1,
+                           "ex":[{"n":201,"empty":0,"tgt":1,"fd":"Master","tok":"FaderMaster"},{"n":202,"empty":0,"tgt":1,"fd":"X","tok":"FaderX"},{"n":203,"empty":0,"tgt":1,"fd":"Temp","tok":"FaderTemp"}]});
+        v["sid"] = json!(plugin.sid);
+        let f = plugin.frame(v);
+        link.receive(&f, 80.0);
+        // Review 7: a crossfade's 1.0 -> 0.0 pair must reach the plugin as two positions.
+        let x = CtlTarget::Executor { ex: 202, el: "fader" };
+        link.control_event("mtouch", "Strip2", x, CtlKind::Touch { down: true }, 80.0);
+        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 1.0 }, 80.001);
+        link.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: 0.0 }, 80.002);
+        assert_eq!(link.queued_motion(), 2);
+        assert_eq!(link.stats.ctl_coalesced, 0);
+        link.tick(80.003);
+        let c: Vec<Value> = plugin.decode(link.take_outgoing());
+        let c = ctl_packets(&c);
+        assert_eq!(c.len(), 2, "touch down went out at once; the first position now, the second waits for the rate interval: {c:?}");
+        assert_eq!(c[1]["v"], 1.0);
+        link.tick(80.01);
+        let c2: Vec<Value> = plugin.decode(link.take_outgoing());
+        let c2 = ctl_packets(&c2);
+        assert_eq!(c2.len(), 1);
+        assert_eq!(c2[0]["v"], 0.0);
+        // Temp keeps its positions too; a Master merges; an executor the context does not list is kept whole.
+        let t = CtlTarget::Executor { ex: 203, el: "fader" };
+        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.0 }, 80.1);
+        link.control_event("mtouch", "Strip3", t, CtlKind::Abs { v: 0.3 }, 80.101);
+        let m = CtlTarget::Executor { ex: 201, el: "fader" };
+        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.1 }, 80.1);
+        link.control_event("mtouch", "Strip1", m, CtlKind::Abs { v: 0.2 }, 80.101);
+        let u = CtlTarget::Executor { ex: 299, el: "fader" };
+        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.1 }, 80.1);
+        link.control_event("mtouch", "Strip9", u, CtlKind::Abs { v: 0.2 }, 80.101);
+        assert_eq!(link.queued_motion(), 5);
+        assert_eq!(link.stats.ctl_coalesced, 1);
+        // A slot target merges (an attribute's value is stateless).
+        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.1 }, 80.2);
+        link.control_event("mtouch", "StripS", slot(1), CtlKind::Abs { v: 0.9 }, 80.201);
+        assert_eq!(link.stats.ctl_coalesced, 2);
+        // The per-control queue is bounded: beyond motion_per_control the oldest position of that control is dropped and counted.
+        let mut link2 = Link::new(Config { id: "nxk-test".into(), motion_per_control: 3, ..Config::default() }, Key::from_hex(&"0123456789abcdef".repeat(4)).unwrap(), 90.0);
+        let mut plugin2 = FakePlugin::new(Key::from_hex(&"0123456789abcdef".repeat(4)).unwrap());
+        link2.tick(90.0);
+        let hello = plugin2.decode(link2.take_outgoing());
+        let nonce = hello[0]["nonce"].as_str().unwrap().to_string();
+        let w = plugin2.welcome(&nonce);
+        link2.receive(&w, 90.01);
+        let mut v2 = json!({"t":"context","gen":plugin2.generation,"epoch":1,"known":1,"cg":1,"enc":{},"slots":[],"page":1,"pool":"Default","display":1,"ex":[{"n":202,"empty":0,"tgt":1,"fd":"X","tok":"FaderX"}]});
+        v2["sid"] = json!(plugin2.sid);
+        let f2 = plugin2.frame(v2);
+        link2.receive(&f2, 90.02);
+        for i in 0..5 {
+            link2.control_event("mtouch", "Strip2", x, CtlKind::Abs { v: i as f64 / 10.0 }, 90.1 + i as f64 * 0.0001);
+        }
+        assert_eq!(link2.queued_motion(), 3);
+        assert_eq!(link2.stats.ctl_overflow, 2);
+    }
 }

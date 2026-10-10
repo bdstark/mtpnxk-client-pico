@@ -58,7 +58,7 @@ local my_handle     = select(4, ...)
 local socket = require("socket")
 local json   = require("json")
 
-local VERSION   = "0.3.0"
+local VERSION   = "0.4.0"
 local PROTOCOL  = 1
 local MAGIC     = "MTX1"
 local DEFAULTS = {
@@ -76,6 +76,8 @@ local DEFAULTS = {
   errReplyMs = 500,      -- at most one err reply per source address per this interval
   maxHolds = 12, maxHoldMs = 60000,
   display = 1,
+  controlWorkPerTick = 4,  -- KB-18: continuous-control intents applied per loop iteration
+  maxCtlDelta = 4096,
   benchMs = 500,         -- how long bench mode waits for a NUM tap to show on the command line
   readsPerService = 4,
 }
@@ -233,7 +235,7 @@ end
 -- Argument parsing
 -------------------------------------------------------------------------------
 local function parseArgument(argument)
-  local opts = { input = "keyboard" }
+  local opts = { input = "keyboard", control = "off" }
   for tok in tostring(argument or ""):gmatch("%S+") do
     local l = tok:lower()
     local k, v = tok:match("^(%a+)=(.*)$")
@@ -274,6 +276,10 @@ local function parseArgument(argument)
           if not SURFACE_METHODS[method] then return nil, "route: method must be quickkey or shortcut (got '" .. method .. "')" end
           opts.routes[logical] = method
         end
+      elseif k == "control" then
+        local m = v:lower()
+        if m ~= "fake" and m ~= "off" then return nil, "control must be fake or off (KB-18 ships the fake backend only)" end
+        opts.control = m
       elseif k == "display" then opts.display = tonumber(v); if not opts.display then return nil, "display must be a number" end
       elseif k == "execs" then opts.execs = {}; for n in v:gmatch("[^,]+") do opts.execs[#opts.execs + 1] = tonumber(n) end
       else return nil, "unknown option '" .. tok .. "'" end
@@ -327,8 +333,20 @@ end
 -------------------------------------------------------------------------------
 local function hk() local r = state.modules.hardkeys; return r and r.instance end
 local function fb() local r = state.modules.feedback; return r and r.instance end
+local function ctl() local r = state.modules.control; return r and r.instance end
 
 local function closeSession(s, now, reason)
+  local cinst = ctl()
+  if cinst and s.controlOpen then
+    -- KB-18: every gesture of the session is ended through the backend, queued motion is dropped.
+    local ok, r = pcall(cinst.closeSession, cinst, s.sid, now, reason)
+    if ok and type(r) == "table" then
+      for _, e in ipairs(r.ended or {}) do log("session %s (%s) %s: %s on %s/%s ended (%s)", s.sid, s.id, reason, tostring(e.kind), tostring(e.device), tostring(e.control), tostring(e.outcome)) end
+      for _, u in ipairs(r.unresolved or {}) do logerr("session %s (%s) %s: %s release on %s/%s UNRESOLVED: %s", s.sid, s.id, reason, tostring(u.kind), tostring(u.device), tostring(u.control), tostring(u.error)) end
+      if (r.dropped or 0) > 0 then log("session %s (%s) %s: %d queued intent(s) dropped, never applied late", s.sid, s.id, reason, r.dropped) end
+    elseif not ok then logerr("closing control session %s failed: %s", s.sid, tostring(r)) end
+  end
+  s.controlOpen = false
   local inst = hk()
   if inst and s.sessionOpen then
     local ok, r = pcall(inst.closeSession, inst, s.sid, now, reason)
@@ -416,13 +434,25 @@ local function openSession(obj, ip, port, now)
     if not r then return nil, "session-open-failed: " .. tostring(err and err.message) end
     s.sessionOpen = true
   end
+  local cinst = ctl()
+  if cinst and state.controlEnabled then
+    local r, err = cinst:openSession({ id = sid, leaseMs = DEFAULTS.leaseMs, label = obj.id, binding = ip .. ":" .. tostring(port) }, now)
+    if not r then
+      if s.sessionOpen then pcall(inst.closeSession, inst, sid, now, "control-session-failed") end
+      return nil, "control-session-open-failed: " .. tostring(err and err.message)
+    end
+    s.controlOpen = true
+    s.ctlLastEvByControl = {}
+  end
   state.sessions[sid] = s
   state.byId[obj.id] = s
   log("session %s opened for %s (%s fw %s, surface gen %s) from %s:%d; %d key(s) physically down, not pressed", sid, obj.id, tostring(obj.surface), tostring(obj.fw), tostring(obj.gen), ip, port, #held)
   local welcome = { t = "welcome", v = PROTOCOL, nonce = obj.nonce, gen = state.gen, lease = DEFAULTS.leaseMs, hb = DEFAULTS.hbMs,
                     keys = describeKeys(false), modules = state.moduleVersions, console = consoleInfo(), input = state.inputMode, backend = state.backendName,
                     plugin = VERSION, epoch = fb() and fb():epoch() or nil,
-                    context = (fb() and type(fb().contextSnapshot) == "function") and 1 or 0 }
+                    context = (fb() and type(fb().contextSnapshot) == "function") and 1 or 0,
+                    -- KB-18: whether ctl events are admitted, and through which backend
+                    control = (ctl() and state.controlEnabled) and 1 or 0, controlBackend = state.controlMode }
   sendToSession(s, welcome)
   s.lastFullAt = nil  -- the next tick sends a full state
   return s
@@ -448,6 +478,17 @@ local function admitPacket(s, obj, now)
       -- The module forgot the session (closed with nothing unresolved): reopen it. Nothing is re-pressed.
       local r2, err2 = inst:openSession({ id = s.sid, leaseMs = DEFAULTS.leaseMs, label = s.id, binding = s.ip .. ":" .. tostring(s.port) }, now)
       if not r2 then logerr("session %s: lease renewal and reopen failed: %s / %s", s.sid, tostring(err and err.message), tostring(err2 and err2.message)) end
+    end
+  end
+  local cinst = ctl()
+  if cinst and state.controlEnabled then
+    -- The control lease lapses like the hardkeys one (its gestures were ended, nothing is resumed); a
+    -- packet reopens the session so the next gesture is admitted on its own merits.
+    local r = s.controlOpen and cinst:renewSession(s.sid, now, DEFAULTS.leaseMs) or nil
+    if not r then
+      local r2, err2 = cinst:openSession({ id = s.sid, leaseMs = DEFAULTS.leaseMs, label = s.id, binding = s.ip .. ":" .. tostring(s.port) }, now)
+      if r2 then s.controlOpen = true; s.ctlLastEvByControl = {}
+      else s.controlOpen = false; logerr("session %s: control lease renewal and reopen failed: %s", s.sid, tostring(err2 and err2.message)) end
     end
   end
   return true, revived
@@ -574,6 +615,76 @@ local function handleWheel(s, obj, now)
   return nil
 end
 
+-- KB-18: a continuous-control event. {t:"ctl", ev, k: rel|abs|touch|btn, dev, c, es, cg?, gs?, tgt, dx|v|d, fine?}.
+-- Validation first (a malformed packet is rejected, not acknowledged); event-id deduplication as for keys;
+-- for touches and buttons the per-control event-id order (a stale press after its release never acts;
+-- motion is ordered by the module's per-device sequence `es`); then the vendored module admits it:
+-- the binding generation, the target, the per-device order (loss reported, duplicates and reordering
+-- refused), rate, coalescing and bounds are its rules, and its outcome is the acknowledgment.
+local CTL_KINDS = { rel = "relative", abs = "absolute", touch = "touch", btn = "button" }
+local CTL_ELEMENTS = { fader = true, key = true, encoder = true }
+local function handleCtl(s, obj, now)
+  local ev = obj.ev
+  if type(ev) ~= "number" or ev ~= math.floor(ev) or ev < 0 then return "bad-ev" end
+  local kind = CTL_KINDS[obj.k]
+  if not kind then return "bad-kind" end
+  if type(obj.dev) ~= "string" or obj.dev == "" or #obj.dev > 32 then return "bad-dev" end
+  if type(obj.c) ~= "string" or obj.c == "" or #obj.c > 32 then return "bad-control" end
+  if type(obj.es) ~= "number" or obj.es ~= math.floor(obj.es) or obj.es < 1 then return "bad-es" end
+  if obj.cg ~= nil and (type(obj.cg) ~= "number" or obj.cg ~= math.floor(obj.cg)) then return "bad-cg" end
+  if obj.gs ~= nil and (type(obj.gs) ~= "number" or obj.gs ~= math.floor(obj.gs) or obj.gs < 0) then return "bad-gs" end
+  if obj.fine ~= nil and obj.fine ~= 0 and obj.fine ~= 1 then return "bad-fine" end
+  local t = obj.tgt
+  if type(t) ~= "table" then return "bad-target" end
+  local target
+  if t.slot ~= nil then
+    if type(t.slot) ~= "number" or t.slot ~= math.floor(t.slot) or t.slot < 1 or t.slot > 8 then return "bad-target" end
+    target = { slot = t.slot }
+  elseif t.ex ~= nil then
+    if type(t.ex) ~= "number" or t.ex ~= math.floor(t.ex) or t.ex < 1 or not CTL_ELEMENTS[t.el] then return "bad-target" end
+    target = { executor = t.ex, element = t.el }
+  else return "bad-target" end
+  local event = { type = kind, device = obj.dev, control = obj.c, seq = obj.es, generation = obj.cg, gesture = obj.gs, target = target, fine = obj.fine == 1 or nil }
+  if kind == "relative" then
+    if type(obj.dx) ~= "number" or obj.dx ~= math.floor(obj.dx) or obj.dx == 0 or math.abs(obj.dx) > DEFAULTS.maxCtlDelta then return "bad-dx" end
+    event.delta = obj.dx
+  elseif kind == "absolute" then
+    if type(obj.v) ~= "number" or obj.v < 0 or obj.v > 1 then return "bad-v" end
+    event.value = obj.v
+  else
+    if obj.d ~= 0 and obj.d ~= 1 then return "bad-d" end
+    event.down = obj.d == 1
+  end
+  if seenEvent(s, ev) then replayAck(s, ev); return nil end
+  state.counters.ctl = state.counters.ctl + 1
+  if kind == "touch" or kind == "button" then
+    if superseded(s, "ctl:" .. obj.dev .. "/" .. obj.c, ev) then
+      state.counters.superseded = state.counters.superseded + 1
+      ackEvent(s, ev, false, { code = "superseded", why = "a newer touch/button event for this control was already processed; nothing dispatched" })
+      return nil
+    end
+  end
+  local inst = ctl()
+  if not inst or not state.controlEnabled or not s.controlOpen then
+    ackEvent(s, ev, false, { code = "control-disabled", why = "continuous control is " .. tostring(state.controlMode or "off") })
+    return nil
+  end
+  local r, err = inst:submit(s.sid, now, event)
+  if not r then
+    state.counters.ctlRefused = state.counters.ctlRefused + 1
+    local extra = { code = tostring(err and err.code or "error"), why = tostring(err and err.message or err) }
+    if err and err.generation ~= nil then extra.cg = err.generation end
+    if err and err.owner ~= nil then extra.owner = err.owner end
+    ackEvent(s, ev, false, extra)
+    return nil
+  end
+  if (r.lost or 0) > 0 then state.counters.ctlLost = state.counters.ctlLost + r.lost end
+  if r.coalesced then state.counters.ctlCoalesced = state.counters.ctlCoalesced + 1 end
+  local extra = { lost = (r.lost or 0) > 0 and r.lost or nil, coalesced = r.coalesced and 1 or nil, superseded = r.superseded, queued = r.queued, noop = r.noop and 1 or nil, boundary = r.boundary and 1 or nil, evicted = r.evicted }
+  ackEvent(s, ev, true, extra)
+  return nil
+end
+
 -- Heartbeat: the service's view of what is physically held. Lost releases are reconciled here; lost
 -- presses are reported and never pressed late.
 local function handleHeartbeat(s, obj, now, revived)
@@ -607,7 +718,7 @@ local function handleHeartbeat(s, obj, now, revived)
 end
 
 local HANDLERS = {
-  key = handleKey, wheel = handleWheel, hb = handleHeartbeat,
+  key = handleKey, wheel = handleWheel, hb = handleHeartbeat, ctl = handleCtl,
   bye = function(s, _, now) closeSession(s, now, "bye"); return nil end,
 }
 
@@ -948,6 +1059,25 @@ local function exportQuarantine(t)
   return true
 end
 
+-- KB-18: takes the control instance out of service. Every gesture gets an end attempt through its
+-- backend, queued motion is dropped, and the releases that stay unresolved are kept in
+-- state.controlUnresolved for "recover" after a restart.
+local function detachControl(reason, now)
+  local rec = state.modules.control
+  local inst = rec and rec.instance
+  if not inst then return end
+  local ok, r = pcall(inst.dispose, inst, now)
+  if ok and type(r) == "table" then
+    for _, e in ipairs(r.ended or {}) do log("control: %s on %s/%s ended on %s: %s", tostring(e.kind), tostring(e.device), tostring(e.control), tostring(reason), tostring(e.outcome)) end
+    state.controlUnresolved = state.controlUnresolved or {}
+    for _, u in ipairs(r.records or {}) do state.controlUnresolved[#state.controlUnresolved + 1] = u; logerr("control: %s release on %s/%s UNRESOLVED on %s; kept for  Plugin \"mtpnxk_surface\" \"recover\": %s", tostring(u.kind), tostring(u.device), tostring(u.control), tostring(reason), tostring(u.error)) end
+    if (r.dropped or 0) > 0 then log("control: %d queued intent(s) dropped on %s (never applied late)", r.dropped, tostring(reason)) end
+  elseif not ok then logerr("control dispose on %s raised: %s", tostring(reason), tostring(r)) end
+  rec.instance = nil
+  state.controlEnabled = false
+  for _, s in pairs(state.sessions or {}) do s.controlOpen = false end
+end
+
 local function serviceModules(now)
   local released = {}
   local inst = hk()
@@ -970,6 +1100,25 @@ local function serviceModules(now)
     local ok, res = pcall(f.service, f, now)
     if not ok then logerr("feedback service() raised: %s", tostring(res))
     elseif type(res) == "table" and res.invalidated then log("feedback invalidated: %s (epoch %d); the surface sees every item unknown until the next full state", tostring(res.invalidated), f:epoch()) end
+  end
+  -- KB-18: lease and gesture expiries first, then at most controlWorkPerTick intents through the backend.
+  local c = ctl()
+  if c then
+    local ok, res = pcall(c.service, c, now)
+    if not ok then
+      logerr("control service() raised: %s; continuous control disabled, module detached (its records are kept)", tostring(res))
+      detachControl("service-error", now)
+    elseif type(res) == "table" then
+      for _, sid in ipairs(res.expired or {}) do
+        local s = state.sessions[sid]
+        if s then s.controlOpen = false; log("session %s (%s): control lease expired, its gestures were ended and queued motion dropped", sid, s.id) end
+      end
+      for _, e in ipairs(res.ended or {}) do if e.reason ~= "lease-expired" then log("control: %s on %s/%s ended (%s): %s", tostring(e.kind), tostring(e.device), tostring(e.control), tostring(e.reason), tostring(e.outcome)) end end
+      for _, u in ipairs(res.unresolved or {}) do logerr("control: %s release on %s/%s UNRESOLVED: %s", tostring(u.kind), tostring(u.device), tostring(u.control), tostring(u.error)) end
+      if res.dropped and (res.dropped.staleGeneration > 0) then state.counters.ctlStaleDropped = state.counters.ctlStaleDropped + res.dropped.staleGeneration end
+      if res.dropped and (res.dropped.expired > 0) then state.counters.ctlExpired = state.counters.ctlExpired + res.dropped.expired end
+      state.counters.ctlApplied = state.counters.ctlApplied + (res.applied or 0)
+    end
   end
   return released
 end
@@ -1020,15 +1169,16 @@ end
 local function resetCounters()
   state.counters = { received = 0, sent = 0, sendErrors = 0, rejected = 0, oversized = 0, notAllowed = 0, ignored = 0, noSession = 0,
                      oldSeq = 0, rateDropped = 0, dupEvents = 0, superseded = 0, refused = 0, presses = 0, releases = 0, wheels = 0, lostReleases = 0,
-                     replayedHello = 0, addressChanged = 0, fullStates = 0, deltaStates = 0, contexts = 0, ticks = 0 }
+                     replayedHello = 0, addressChanged = 0, fullStates = 0, deltaStates = 0, contexts = 0, ticks = 0,
+                     ctl = 0, ctlRefused = 0, ctlLost = 0, ctlCoalesced = 0, ctlApplied = 0, ctlStaleDropped = 0, ctlExpired = 0 }
 end
 
 local function loadModules()
   state.modules = {}
   state.moduleVersions = {}
   local summary = {}
-  for _, entry in ipairs({ { key = "hardkeys", component = "gma3_mcp_hardkeys" }, { key = "feedback", component = "gma3_mcp_feedback" } }) do
-    local rec = { component = entry.component, loaded = false }
+  for _, entry in ipairs({ { key = "hardkeys", component = "gma3_mcp_hardkeys" }, { key = "feedback", component = "gma3_mcp_feedback" }, { key = "control", component = "gma3_mcp_control", optional = true } }) do
+    local rec = { component = entry.component, loaded = false, optional = entry.optional }
     local mod, err = loadModule(entry.component)
     if mod then
       rec.module, rec.version, rec.loaded = mod, mod.VERSION, true
@@ -1037,6 +1187,25 @@ local function loadModules()
         local deps = mod.consoleDeps(_G)
         if entry.key == "hardkeys" then
           return mod.new({ owner = pluginName, deps = deps, config = { requireInteraction = false, maxHolds = DEFAULTS.maxHolds, maxHoldMs = DEFAULTS.maxHoldMs, defaultLeaseMs = DEFAULTS.leaseMs } }):init()
+        end
+        if entry.key == "control" then
+          -- KB-18: the binding is this plugin's cached context snapshot (the same one the context message
+          -- carries, so the service's cg and the module's generation are one number); the other input
+          -- owner is this plugin's hardkeys instance.
+          deps.binding = function(t)
+            local f = fb()
+            if not f or type(f.contextSnapshot) ~= "function" then return nil end
+            return f:contextSnapshot(contextSpec(), t, { cached = true })
+          end
+          deps.busy = function(_, t)
+            local h = hk()
+            if not h or type(h.admission) ~= "function" then return nil end
+            local ok, busy = pcall(h.admission, h, t)
+            return ok and busy or nil
+          end
+          -- This plugin's binding (display= and execs=) is fixed for its run, so events carry no binding
+          -- revision; the exemption is declared here, explicitly (the module requires the revision by default).
+          return mod.new({ owner = pluginName, deps = deps, config = { defaultLeaseMs = DEFAULTS.leaseMs, maxWorkPerService = DEFAULTS.controlWorkPerTick, requireBindingRevision = false } }):init()
         end
         return mod.new({ owner = pluginName, deps = deps, config = { maxReadsPerService = DEFAULTS.readsPerService } }):init()
       end)
@@ -1081,6 +1250,7 @@ local function adoptKeptMode(t)
 end
 
 local enableInput  -- defined below; recover re-enables the requested input after a quarantine clears
+local enableControl  -- KB-18: defined below
 
 -------------------------------------------------------------------------------
 -- Quickey bank (KB-12) and backend adapters (KB-13/KB-15)
@@ -1224,6 +1394,31 @@ local function recoverUnresolved()
 end
 state._recover = recoverUnresolved
 
+-- KB-18: continuous control is an explicit per-start decision (control=fake); the fake backend records
+-- intents and moves nothing on the console (the adjustment backend is KB-19). Records a previous run
+-- could not release are adopted so "recover" can re-attempt them.
+enableControl = function(mode)
+  state.controlMode = mode or "off"
+  state.controlEnabled = false
+  local rec = state.modules.control
+  if mode == nil or mode == "off" then
+    if rec and rec.instance then log("control off: ctl events are acknowledged control-disabled") end
+    return true
+  end
+  if not rec or not rec.instance then logerr("control %s requested but the control module is not loaded (%s)", mode, tostring(rec and rec.error)); state.controlMode = "off"; return false end
+  local ok, err = pcall(function() rec.instance:enableInput(rec.module.fakeBackend()) end)
+  if not ok then logerr("control %s: enableInput failed: %s", mode, tostring(err)); state.controlMode = "off"; return false end
+  local kept = state.controlUnresolved or {}
+  if #kept > 0 then
+    local a = rec.instance:adopt(kept, now())
+    state.controlUnresolved = {}
+    log("control: adopted %d unresolved release(s) from a previous run (recover re-attempts them)", a.adopted)
+  end
+  state.controlEnabled = true
+  log("control enabled on the %s backend (intents recorded; nothing moves on the console until KB-19)", mode)
+  return true
+end
+
 local function bridgeInputEnabled()
   local b = rawget(_G, "__gma3_mcp_bridge")
   return type(b) == "table" and b.running == true and type(b.input) == "table" and b.input.enabled == true
@@ -1289,6 +1484,7 @@ local function disposeAll(reason)
   local t = now()
   for _, s in pairs(state.sessions or {}) do closeSession(s, t, reason) end
   detachHardkeys(reason, t)
+  detachControl(reason, t)
   local f = fb()
   if f then pcall(f.dispose, f) end
   state.modules = {}
@@ -1298,7 +1494,7 @@ end
 local function describe()
   local n = 0
   for _ in pairs(state.sessions or {}) do n = n + 1 end
-  return fmt("running=%s bind=%s:%d input=%s backend=%s sessions=%d gen=%s", tostring(state.running), tostring(state.host), tonumber(state.port) or 0, tostring(state.inputMode), tostring(state.backendName), n, tostring(state.gen))
+  return fmt("running=%s bind=%s:%d input=%s backend=%s control=%s sessions=%d gen=%s", tostring(state.running), tostring(state.host), tonumber(state.port) or 0, tostring(state.inputMode), tostring(state.backendName), tostring(state.controlMode or "off"), n, tostring(state.gen))
 end
 
 local function serverMain()
@@ -1360,8 +1556,10 @@ local function start(opts)
     adoptKeptBank(t)
     provisionBank(opts, t)
     enableInput(opts.input, opts.force)
+    enableControl(opts.control)
   else
     state.inputMode, state.inputEnabled = "off", false
+    enableControl("off")
     logerr("input blocked: a previous instance still owns key records it could not export; run  Plugin \"mtpnxk_surface\" \"recover\"")
   end
   describeKeys(true)
@@ -1376,7 +1574,19 @@ local function MainImpl(display_handle, argument)
     if state.running then state.stopRequested = true; log("stop requested") else log("not running") end
     return
   end
-  if opts.command == "recover" then recoverUnresolved(); return end
+  if opts.command == "recover" then
+    recoverUnresolved()
+    local c = ctl()
+    if c then
+      if not c:backendAvailable() then c:attachBackend(state.modules.control.module.fakeBackend()) end
+      local kept = state.controlUnresolved or {}
+      if #kept > 0 then local a = c:adopt(kept, now()); state.controlUnresolved = {}; log("control recover: adopted %d record(s) from a previous run", a.adopted) end
+      local r = c:recover(now())
+      log("control recover: %d resolved, %d still unresolved", #r.resolved, #r.unresolved)
+      for _, u in ipairs(r.unresolved) do logerr("control recover: still UNRESOLVED %s release on %s/%s: %s", tostring(u.kind), tostring(u.device), tostring(u.control), tostring(u.error)) end
+    elseif state.controlUnresolved and #state.controlUnresolved > 0 then log("control recover: not running; %d record(s) kept for the next start with control=fake", #state.controlUnresolved) end
+    return
+  end
   if opts.command and opts.command:match("^bank%-") then
     local inst = hk()
     if not inst then
@@ -1428,6 +1638,16 @@ local function MainImpl(display_handle, argument)
         else log("keyboard-shortcut mode change %s %s (profile '%s', shortcuts %s -> %s)", tostring(m.id), tostring(m.state), tostring(m.profile), tostring(m.original), tostring(m.target)) end
       end
     end
+    local c = ctl()
+    if c then
+      local st = c:status(now())
+      local busy = c:admission(now())
+      log("control: %s backend=%s unresolved=%d counters admitted=%d applied=%d refused=%d lost=%d coalesced=%d dropped=%d%s", state.controlEnabled and "enabled" or "disabled", tostring(st.backend), #st.unresolved,
+          st.counters.admitted, st.counters.applied, st.counters.refused, st.counters.lost, st.counters.coalesced, st.counters.dropped, busy and (" BUSY: " .. tostring(busy.description)) or "")
+      for id, sv in pairs(st.sessions) do for _, g in ipairs(sv.gestureList or {}) do log("control gesture %s: %s on %s/%s target=%s generation=%s%s", id, g.kind, g.device, g.control, json.encode(g.target), tostring(g.generation), g.rebound and " REBOUND (release and re-touch)" or "") end end
+      for _, u in ipairs(st.unresolved) do logerr("control UNRESOLVED: %s release on %s/%s: %s", tostring(u.kind), tostring(u.device), tostring(u.control), tostring(u.error)) end
+    end
+    if state.controlUnresolved and #state.controlUnresolved > 0 then log("%d unresolved control release(s) kept from a previous run (not adopted yet)", #state.controlUnresolved) end
     for sid, s in pairs(state.sessions or {}) do
       local held = {}
       for name in pairs(s.holds) do held[#held + 1] = name end
@@ -1479,6 +1699,6 @@ end
 -- Exposed for the harness (stock Lua, stubbed socket): the pure functions and the loop pieces.
 state._siphash24, state._mac, state._toHex, state._fromHex = siphash24, mac, toHex, fromHex
 state._parseArgument, state._NXK_KEYS, state._DEFAULTS, state._VERSION = parseArgument, NXK_KEYS, DEFAULTS, VERSION
-state._describe, state._enableInput = describe, enableInput
+state._describe, state._enableInput, state._enableControl = describe, enableInput, enableControl
 
 return Main, Cleanup

@@ -153,8 +153,12 @@ impl Loop {
                     }
                     self.link.key_event(name, false, now);
                 }
-                Event::Rotate { wheel, delta, .. } => self.link.wheel_event(wheel, delta, self.bank_held, now),
-                Event::PressDown { .. } | Event::PressUp { .. } => {}
+                // KB-18: the four rotaries are the four encoder slots of the bound display; Bank held is
+                // the explicit fine modifier (KB-19 decides what it means on the console); a push is a
+                // button boundary. Everything travels as `ctl` events through the link's admission.
+                Event::Rotate { wheel, delta, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel), link::CtlKind::Rel { dx: delta, fine: self.bank_held }, now),
+                Event::PressDown { wheel, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel), link::CtlKind::Btn { down: true }, now),
+                Event::PressUp { wheel, .. } => self.link.control_event("nxk", ROTARIES[(wheel.clamp(1, 4) - 1) as usize], link_target(wheel), link::CtlKind::Btn { down: false }, now),
                 Event::Unknown { bytes } => {
                     if self.verbose {
                         eprintln!("nxk: unknown packet {bytes:02x?}");
@@ -211,6 +215,12 @@ impl Loop {
         }
         Ok(())
     }
+}
+
+const ROTARIES: [&str; 4] = ["Rotary1", "Rotary2", "Rotary3", "Rotary4"];
+
+fn link_target(wheel: u8) -> protocol::CtlTarget {
+    protocol::CtlTarget::Slot { slot: wheel.clamp(1, 4) }
 }
 
 fn percentiles(label: &str, samples: &[f64]) {
@@ -327,8 +337,12 @@ fn print_summary(link: &link::Link) {
         st.rejected,
         st.dropped_unpaired
     );
+    println!(
+        "control: events={} sent={} coalesced={} unbound={} aged={} stale={} unsupported={} refused={} lost_reported={} superseded={} overflow={} queued={}",
+        st.ctl_events, st.ctl_sent, st.ctl_coalesced, st.ctl_unbound, st.ctl_aged, st.ctl_stale, st.ctl_unsupported, st.ctl_refused, st.ctl_lost_reported, st.ctl_superseded, st.ctl_overflow, link.queued_motion()
+    );
     if let Some(s) = link.session() {
-        println!("session: sid={} plugin gen={} input={:?} keys ok={} unsupported={:?}", s.sid, s.plugin_gen, s.input, s.keys.ok.len(), s.keys.unsupported);
+        println!("session: sid={} plugin gen={} input={:?} control={} keys ok={} unsupported={:?}", s.sid, s.plugin_gen, s.input, if s.control { s.control_backend.clone().unwrap_or_else(|| "on".into()) } else { "off".into() }, s.keys.ok.len(), s.keys.unsupported);
     }
     for r in &link.refusals {
         println!("refused ev {}: [{}] {}", r.ev, r.code, r.why);

@@ -1,17 +1,18 @@
 # Vendored console modules
 
-`gma3_mcp_hardkeys.lua` and `gma3_mcp_feedback.lua` are copied **unchanged**
+`gma3_mcp_hardkeys.lua`, `gma3_mcp_feedback.lua` and `gma3_mcp_control.lua` are copied **unchanged**
 from [bdstark/GrandMA3MCP](https://github.com/bdstark/GrandMA3MCP) (MIT, see
 [LICENSE.gma3-mcp](LICENSE.gma3-mcp)). They are the console-semantics layer:
-key routes, ownership and leases, read-only state readers. The surface plugin
+key routes, ownership and leases, read-only state readers, continuous-control admission. The surface plugin
 (`mtpnxk_surface.lua`) only consumes them.
 
 | Component | Version | Module API | Copied from |
 | --- | --- | --- | --- |
-| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `c8dbb3a` (branch `feat/kb17-context-snapshot`; unchanged since `3960334`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
-| `gma3_mcp_feedback` | 0.3.0 | 1 | `c8dbb3a` (KB-17: control-context readers, `contextSnapshot()`/`watchContext()` with the binding generation incl. the whole selection identity after a validated traversal and every configured function); sha256 `7949a11282b97cdbf71cf596957f13231807b217c40c315e10623856053938c0` |
+| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `9f08f87` (branch `feat/kb18-control-admission`; unchanged since `3960334`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
+| `gma3_mcp_feedback` | 0.3.0 | 1 | `9f08f87` (unchanged since `c8dbb3a`, KB-17: control-context readers, `contextSnapshot()`/`watchContext()` with the binding generation incl. the whole selection identity after a validated traversal and every configured function); sha256 `7949a11282b97cdbf71cf596957f13231807b217c40c315e10623856053938c0` |
+| `gma3_mcp_control` | 0.1.0 | 1 | `9f08f87` (KB-18: continuous-control events with admission against the binding generation and revision, per-device ordering with loss reporting and late releases, coalescing, bounds with reserved release capacity, target ownership and the busy descriptor, batched recovery, releases kept across a rebind, a required binding revision unless the consumer declares a fixed binding (this plugin does); fake backend only; both PR #22 review rounds are in); sha256 `dbeeb8b765c7cbd883532dd03d84e514b90a27358bde13a513af853036bde573` |
 
-Previous pins: hardkeys 0.10.0 / feedback 0.2.0 at `3960334` (KB-15); hardkeys 0.5.0 `d73a8e10…` (PR #12, `6e0d9c1`), used by the KB-07/KB-08 records.
+Previous pins: hardkeys 0.10.0 / feedback 0.3.0 at `c8dbb3a` (KB-17); hardkeys 0.10.0 / feedback 0.2.0 at `3960334` (KB-15); hardkeys 0.5.0 `d73a8e10…` (PR #12, `6e0d9c1`), used by the KB-07/KB-08 records.
 
 Upstream's `plugin/modules.lock.json` carries the same hashes. Check them before
 packaging (`shasum -a 256 tools/ma3/gma3_mcp_*.lua`): the version strings alone do
@@ -29,7 +30,7 @@ Rules (from that repository's `docs/modules.md`, "Vendoring into another plugin"
 3. Re-vendor with:
 
    ```bash
-   cp ../GrandMA3/plugin/gma3_mcp_hardkeys.lua ../GrandMA3/plugin/gma3_mcp_feedback.lua tools/ma3/
+   cp ../GrandMA3/plugin/gma3_mcp_hardkeys.lua ../GrandMA3/plugin/gma3_mcp_feedback.lua ../GrandMA3/plugin/gma3_mcp_control.lua tools/ma3/
    ```
 
    then update the table above (version, commit, sha256) and run

@@ -3,7 +3,8 @@
 //!
 //! Script syntax: comma-separated steps, each `<key>:<down|up|tap>[@<ms>]`, where `@<ms>` is the
 //! time since the previous step (default 100). A `tap` is down then up 60 ms later. Example:
-//! `Record:down,5:tap@50,Record:up@300,Enter:tap`.
+//! `Record:down,5:tap@50,Record:up@300,Enter:tap`. KB-18 adds the rotaries: `rot<n>:<delta>` turns
+//! encoder n (1..4) by a signed number of detents and `btn<n>:<down|up|tap>` pushes it.
 
 use crate::nxk::usb::Surface;
 use crate::nxk::{self, Event};
@@ -11,11 +12,17 @@ use anyhow::{anyhow, Result};
 use std::collections::VecDeque;
 use std::time::Instant;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    Key { name: &'static str, down: bool },
+    Rotate { wheel: u8, delta: i32 },
+    Push { wheel: u8, down: bool },
+}
+
 #[derive(Debug, Clone)]
 pub struct Step {
     pub at_ms: u64,
-    pub name: &'static str,
-    pub down: bool,
+    pub action: Action,
 }
 
 fn key_name(s: &str) -> Result<&'static str> {
@@ -32,14 +39,36 @@ pub fn parse_script(script: &str) -> Result<Vec<Step>> {
             None => (part, 100),
         };
         let (key, action) = spec.rsplit_once(':').ok_or_else(|| anyhow!("step '{part}' needs <key>:<down|up|tap>"))?;
-        let name = key_name(key.trim())?;
+        let key = key.trim();
         t += delay;
+        let lower = key.to_ascii_lowercase();
+        if let Some(n) = lower.strip_prefix("rot").and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=4).contains(n)) {
+            let delta: i32 = action.trim().parse().map_err(|_| anyhow!("rot{n} needs a signed delta in '{part}'"))?;
+            if delta == 0 || delta.abs() > 4096 {
+                return Err(anyhow!("rot{n}: delta must be non-zero and within +-4096 in '{part}'"));
+            }
+            steps.push(Step { at_ms: t, action: Action::Rotate { wheel: n, delta } });
+            continue;
+        }
+        if let Some(n) = lower.strip_prefix("btn").and_then(|n| n.parse::<u8>().ok()).filter(|n| (1..=4).contains(n)) {
+            match action.trim() {
+                "down" => steps.push(Step { at_ms: t, action: Action::Push { wheel: n, down: true } }),
+                "up" => steps.push(Step { at_ms: t, action: Action::Push { wheel: n, down: false } }),
+                "tap" => {
+                    steps.push(Step { at_ms: t, action: Action::Push { wheel: n, down: true } });
+                    steps.push(Step { at_ms: t + 60, action: Action::Push { wheel: n, down: false } });
+                }
+                other => return Err(anyhow!("unknown action '{other}' in '{part}'")),
+            }
+            continue;
+        }
+        let name = key_name(key)?;
         match action.trim() {
-            "down" => steps.push(Step { at_ms: t, name, down: true }),
-            "up" => steps.push(Step { at_ms: t, name, down: false }),
+            "down" => steps.push(Step { at_ms: t, action: Action::Key { name, down: true } }),
+            "up" => steps.push(Step { at_ms: t, action: Action::Key { name, down: false } }),
             "tap" => {
-                steps.push(Step { at_ms: t, name, down: true });
-                steps.push(Step { at_ms: t + 60, name, down: false });
+                steps.push(Step { at_ms: t, action: Action::Key { name, down: true } });
+                steps.push(Step { at_ms: t + 60, action: Action::Key { name, down: false } });
             }
             other => return Err(anyhow!("unknown action '{other}' in '{part}'")),
         }
@@ -84,8 +113,14 @@ impl Surface for SimKeypad {
                 break;
             }
             let s = self.queue.pop_front().unwrap();
-            let id = nxk::button_id(s.name).unwrap_or(0);
-            out.push(if s.down { Event::KeyDown { name: s.name, id } } else { Event::KeyUp { name: s.name, id } });
+            out.push(match s.action {
+                Action::Key { name, down } => {
+                    let id = nxk::button_id(name).unwrap_or(0);
+                    if down { Event::KeyDown { name, id } } else { Event::KeyUp { name, id } }
+                }
+                Action::Rotate { wheel, delta } => Event::Rotate { wheel, delta, id: 0 },
+                Action::Push { wheel, down } => if down { Event::PressDown { wheel, id: 0 } } else { Event::PressUp { wheel, id: 0 } },
+            });
         }
         if self.queue.is_empty() {
             match &self.loop_script {
@@ -128,9 +163,16 @@ mod tests {
     #[test]
     fn scripts_expand_in_order() {
         let s = parse_script("Record:down,5:tap@50,Record:up@300,enter:tap").unwrap();
-        let names: Vec<(u64, &str, bool)> = s.iter().map(|x| (x.at_ms, x.name, x.down)).collect();
-        assert_eq!(names, vec![(100, "Record", true), (150, "5", true), (210, "5", false), (450, "Record", false), (550, "Enter", true), (610, "Enter", false)]);
+        let names: Vec<(u64, Action)> = s.iter().map(|x| (x.at_ms, x.action.clone())).collect();
+        assert_eq!(names, vec![(100, Action::Key { name: "Record", down: true }), (150, Action::Key { name: "5", down: true }), (210, Action::Key { name: "5", down: false }), (450, Action::Key { name: "Record", down: false }), (550, Action::Key { name: "Enter", down: true }), (610, Action::Key { name: "Enter", down: false })]);
         assert!(parse_script("Bogus:tap").is_err());
         assert!(parse_script("Record:wiggle").is_err());
+        // KB-18: rotaries.
+        let r = parse_script("rot1:+3,rot2:-2@10,btn1:tap@20,Rot4:1").unwrap();
+        let acts: Vec<(u64, Action)> = r.iter().map(|x| (x.at_ms, x.action.clone())).collect();
+        assert_eq!(acts, vec![(100, Action::Rotate { wheel: 1, delta: 3 }), (110, Action::Rotate { wheel: 2, delta: -2 }), (130, Action::Push { wheel: 1, down: true }), (190, Action::Push { wheel: 1, down: false }), (230, Action::Rotate { wheel: 4, delta: 1 })]);
+        assert!(parse_script("rot5:1").is_err());
+        assert!(parse_script("rot1:0").is_err());
+        assert!(parse_script("btn2:wiggle").is_err());
     }
 }
