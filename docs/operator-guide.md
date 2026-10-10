@@ -10,7 +10,7 @@ surface plugin and service. Qualified scope: [deployments.md](deployments.md)
 | Component | File(s) | Goes where |
 | --- | --- | --- |
 | Surface plugin entry component | `tools/ma3/mtpnxk_surface.lua` | the onPC user library plugins folder |
-| Vendored console modules (two) | `tools/ma3/gma3_mcp_hardkeys.lua` (0.5.0), `tools/ma3/gma3_mcp_feedback.lua` (0.2.0) | same folder; they are components of the same plugin |
+| Vendored console modules (two) | `tools/ma3/gma3_mcp_hardkeys.lua` (0.10.0), `tools/ma3/gma3_mcp_feedback.lua` (0.2.0) | same folder; they are components of the same plugin |
 | Import wrapper | `tools/ma3/mtpnxk_surface.xml` | same folder |
 | Surface service | `service/` → `mtpnxk` binary | the machine the NX-K is plugged into |
 
@@ -62,9 +62,43 @@ Plugin "mtpnxk_surface" "key=<64 hex>"
 
 Defaults: listens on `127.0.0.1:9810` (service on the same machine), input on
 the keyboard backend, display 1. The start log (System Monitor / command-line
-history) lists every NX-K key and whether it resolved, ending with
+history) lists every NX-K key with the method and backend that would press it
+(`key 1: NUM1 via shortcut (keyboard, shortcut-table)`), ending with
 `keys: 32 supported, 12 unsupported` on the default US profile, then
-`listening on 127.0.0.1:9810 (v0.1.0, protocol 1, gen …)`.
+`listening on 127.0.0.1:9810 (v0.2.0, protocol 1, gen …)`.
+
+### 4a. Quickey dispatch (KB-15, the preferred path once set up)
+
+```text
+Plugin "mtpnxk_surface" "key=<64 hex> bank=900/1.178-189 input=mixed"
+```
+
+`bank=<quickey>/<page>.<first>-<last>` is the operator's decision to create show
+objects: one Quickey per hardkey code with KB-10 evidence (nine on onPC 2.5.1:
+`MA1 FIXTURE STORE NUM1 NUM5 THRU PLEASE OOPS CLEAR`, names `MCP <CODE>`, from
+pool index 900) plus a code-less `MCP RESERVED` placeholder, and the executor
+range reserved for holds (12 executors, one per concurrently held key; the
+range must be empty, an unowned object anywhere in it refuses the whole setup
+and nothing is created). The bank is verified at every start, kept as a record
+across `stop`, re-verified by `bank verify`, shown by `bank status`, and removed
+only by `bank teardown` (refused while a Quickey is held). The show must be
+saved for the objects to survive a reload.
+
+`input=mixed` presses the keys with hold evidence (`1`, `5`, `Thru`, `Enter`,
+`Record`, `Clear`) as executor presses of their Quickeys and every other key
+through the shortcut table as before; the start log names the part per key.
+`input=quickey` uses Quickeys only (the other keys are reported unsupported).
+Rules the module enforces, reported to the service as refusals and never
+worked around: a Quickey route without a bank or for a code without evidence is
+refused, nothing is typed instead; a shortcut-table key while a Quickey is held,
+or the reverse, is refused (`unqualified-mix`); so is a second Quickey next to
+one whose code has no chord evidence. `Thru` becomes usable this way on the
+default profile (it has no shortcut row).
+
+`route=<key>:<method>,…` overrides single keys (`quickkey` or `shortcut`); an
+override the backend cannot serve, or that resolves to no usable route, refuses
+the start instead of being accepted inert. `bankcodes=hardkeys` provisions every
+command-area code (94 Quickeys) instead of the qualified nine.
 
 Options, appended to the same quoted string:
 
@@ -72,6 +106,8 @@ Options, appended to the same quoted string:
 | --- | --- |
 | `port=9811` | another UDP port |
 | `bind=0.0.0.0 allow=192.168.1.20` | accept the service from the LAN; `allow` is a comma-separated list of source addresses (without it any source holding the key is accepted). Unqualified deployment, see deployments.md |
+| `input=mixed`, `input=quickey` | Quickey dispatch through the bank (section 4a); need `bank=` once |
+| `bank=900/1.178-189`, `bankcodes=…`, `route=…` | section 4a |
 | `input=off` | feedback only: LEDs follow the console, no key is ever pressed |
 | `input=fake` | lifecycle testing: events are recorded and acknowledged, no key is pressed |
 | `bench` | report press-to-effect timing for digit taps (measurement only) |
@@ -205,7 +241,11 @@ records (if any) are adopted as above.
 
    `ReloadAllPlugins` is needed on 2.5.1: delete and re-import alone can keep
    the cached Lua running (MCP KB-02). It reloads every plugin, so pick the
-   moment. Check the version in the `listening on …` line, then save the show.
+   moment. The reload kills the running loop without its shutdown; since 0.2.0
+   the next start notices the stale run (`has not ticked for …; taking over its
+   state`), releases its holds through the old module instances, keeps their
+   records and the bank record, and continues. Check the version in the
+   `listening on …` line, then save the show.
 3. Rebuild the service (`cargo build --release`) and restart `run`. The service
    logs the plugin's module versions in `paired: …` and in `welcome.modules`.
 4. Re-vendoring the console modules is described in

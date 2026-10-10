@@ -10,9 +10,24 @@
 --   Plugin "mtpnxk_surface" "key=... port=9811 bind=0.0.0.0 allow=192.168.75.10"
 --   Plugin "mtpnxk_surface" "key=... input=off"            feedback only, no console key is ever pressed
 --   Plugin "mtpnxk_surface" "key=... input=fake"           lifecycle testing: events recorded, no key pressed
+--   Plugin "mtpnxk_surface" "key=... bank=900/1.180-191 input=mixed"
+--                                                          KB-15: provision the owned Quickey bank (one
+--                                                          Quickey per KB-10 qualified code, 12 reserved
+--                                                          executors) and press the qualified keys as
+--                                                          executor presses of those Quickeys; every other
+--                                                          key through Keyboard() (explicit per-key table)
+--   Plugin "mtpnxk_surface" "key=... bank=... input=quickey"  Quickeys only: unqualified keys are refused
+--   Plugin "mtpnxk_surface" "key=... input=mixed route=Undo:quickkey,2:shortcut"
+--                                                          per-key override of the dispatch method; an
+--                                                          override the backend cannot serve refuses the start
+--   Plugin "mtpnxk_surface" "key=... bankcodes=hardkeys"   provision every command-area code (94 Quickeys)
 --   Plugin "mtpnxk_surface" "key=... force"                start even though the MCP bridge has input enabled
 --   Plugin "mtpnxk_surface" "key=... bench"                report press-to-effect timing for NUM taps
 --   Plugin "mtpnxk_surface" "stop" | "status" | "recover"   (recover: re-attempt unresolved key releases)
+--   Plugin "mtpnxk_surface" "bank status" | "bank verify" | "bank teardown"
+--                                                          (teardown: delete the verified owned Quickeys and
+--                                                          clear the reserved executors; refused while a
+--                                                          Quickey record is live)
 --
 -- Rules this plugin keeps (KEYBOARD.md KB-07, docs/surface-protocol.md):
 --   * every datagram is authenticated (SipHash-2-4 under the pairing key) before it is parsed; a sender
@@ -24,7 +39,12 @@
 --     reads are spread across frames; the loop yields once per console frame;
 --   * every state item is tri-state (0, 1, "?") and carries the plugin generation and feedback epoch;
 --   * the MCP bridge and this plugin do not arbitrate the console keyboard: the start refuses to
---     enable input while the bridge reports input enabled (force overrides; it is a courtesy check).
+--     enable input while the bridge reports input enabled (force overrides; it is a courtesy check);
+--   * KB-15: the dispatch method of every key is decided before dispatch and reported at start; a
+--     Quickey route without a bank or for a code without KB-10 evidence is refused, never replaced by
+--     a Keyboard() press, and a PC key next to a held Quickey (or the reverse) is refused as an
+--     unqualified mix. The bank is created only by the operator's plugin argument (bank=...), kept as a
+--     record across stop/start and removed only by "bank teardown".
 
 local pluginName    = select(1, ...)
 local componentName = select(2, ...)
@@ -34,7 +54,7 @@ local my_handle     = select(4, ...)
 local socket = require("socket")
 local json   = require("json")
 
-local VERSION   = "0.1.0"
+local VERSION   = "0.2.0"
 local PROTOCOL  = 1
 local MAGIC     = "MTX1"
 local DEFAULTS = {
@@ -161,6 +181,27 @@ local NXK_KEYS = {
 -- names the row (spec.prefer, hardkeys 0.5.0), and the chosen row keeps every safeguard: shortcut
 -- enablement, the collision check and the route rechecks before every release.
 local NXK_PREFER = { ["+"] = "kpAdd", ["-"] = "kpSubtract", ["."] = "kpDecimal", ["/"] = "kpDivide" }
+-- KB-15 dispatch methods. On the mixed backend the default is quickkey (an executor press of the owned
+-- Quickey, KB-13) and every surface key whose code has no KB-10 HOLD evidence is routed explicitly through
+-- the shortcut table instead (the module validates each override against the attached backend; nothing
+-- here is inert). The surface sends press/release pairs, so a code qualified for taps only (OOPS) is not
+-- a Quickey key. Operators change single keys with route=<key>:<method>; the two methods the surface
+-- offers are quickkey and shortcut (the text routes need text the keypad does not carry).
+local NXK_QUICKKEY_HOLD = { NUM1 = true, NUM5 = true, THRU = true, PLEASE = true, CLEAR = true, STORE = true }
+local SURFACE_METHODS = { quickkey = true, shortcut = true }
+local function mixedPolicy(overrides)
+  local keys = {}
+  for name, logical in pairs(NXK_KEYS) do
+    if not NXK_QUICKKEY_HOLD[logical] then keys[logical] = { method = "shortcut" } end
+  end
+  for logical, method in pairs(overrides or {}) do keys[logical] = { method = method } end
+  return { default = "quickkey", keys = keys }
+end
+local function quickeyPolicy(overrides)
+  local keys = {}
+  for logical, method in pairs(overrides or {}) do keys[logical] = { method = method } end
+  return { default = "quickkey", keys = keys }
+end
 -- Keys the service may send that are not console keys (acknowledged unsupported, never an error).
 local NXK_LOCAL = { Bank = true, ["Swap Prog"] = true, Link = true, Rotary1 = true, Rotary2 = true, Rotary3 = true, Rotary4 = true }
 
@@ -192,7 +233,9 @@ local function parseArgument(argument)
   for tok in tostring(argument or ""):gmatch("%S+") do
     local l = tok:lower()
     local k, v = tok:match("^(%a+)=(.*)$")
-    if l == "stop" or l == "status" or l == "recover" then opts.command = l
+    if opts.bankToken and (l == "status" or l == "verify" or l == "teardown") then opts.command = "bank-" .. l; opts.bankToken = nil
+    elseif l == "stop" or l == "status" or l == "recover" then opts.command = l
+    elseif l == "bank" then opts.bankToken = true
     elseif l == "force" then opts.force = true
     elseif l == "bench" then opts.bench = true
     elseif k then
@@ -203,13 +246,38 @@ local function parseArgument(argument)
       elseif k == "allow" then opts.allow = {}; for ip in v:gmatch("[^,]+") do opts.allow[ip] = true end
       elseif k == "input" then
         local m = v:lower()
-        if m ~= "keyboard" and m ~= "fake" and m ~= "off" then return nil, "input must be keyboard, fake or off" end
+        if m == "quickkey" or m == "qk" then m = "quickey" end
+        if m ~= "keyboard" and m ~= "fake" and m ~= "off" and m ~= "quickey" and m ~= "mixed" then return nil, "input must be keyboard, quickey, mixed, fake or off" end
         opts.input = m
+      elseif k == "bank" then
+        local q, page, first, last = v:match("^(%d+)/(%d+)%.(%d+)%-?(%d*)$")
+        if not q then return nil, "bank must be <quickey>/<page>.<first>[-<last>], e.g. bank=900/1.180-191" end
+        local count = (last ~= "" and (tonumber(last) - tonumber(first) + 1)) or DEFAULTS.maxHolds
+        if count < 1 then return nil, "bank executor range is empty" end
+        opts.bank = { quickeyFirst = tonumber(q), page = tonumber(page), executorFirst = tonumber(first), executorCount = count }
+      elseif k == "bankcodes" then
+        local m = v:lower()
+        if m ~= "hardkeys" and m ~= "qualified" then return nil, "bankcodes must be hardkeys or qualified" end
+        opts.bankCodes = m
+      elseif k == "route" then
+        opts.routes = opts.routes or {}
+        for item in v:gmatch("[^,]+") do
+          local name, method = item:match("^([^:]+):(%a+)$")
+          if not name then return nil, "route must be <key>:<method>[,<key>:<method>...], e.g. route=Undo:quickkey" end
+          local logical = NXK_KEYS[name] or (NXK_KEYS[name:gsub("^%l", string.upper)])
+          if not logical then return nil, "route: '" .. name .. "' is not a surface key" end
+          if method == "quickey" or method == "qk" then method = "quickkey" end
+          if not SURFACE_METHODS[method] then return nil, "route: method must be quickkey or shortcut (got '" .. method .. "')" end
+          opts.routes[logical] = method
+        end
       elseif k == "display" then opts.display = tonumber(v); if not opts.display then return nil, "display must be a number" end
       elseif k == "execs" then opts.execs = {}; for n in v:gmatch("[^,]+") do opts.execs[#opts.execs + 1] = tonumber(n) end
       else return nil, "unknown option '" .. tok .. "'" end
     else return nil, "unknown token '" .. tok .. "'" end
   end
+  if opts.bankToken then return nil, "bank: expected bank=<quickey>/<page>.<first>[-<last>], \"bank status\", \"bank verify\" or \"bank teardown\"" end
+  if opts.bankCodes and not opts.bank then return nil, "bankcodes needs a bank=... range in the same argument" end
+  if opts.routes and (opts.input == "fake" or opts.input == "off") then return nil, "route= needs input=keyboard, quickey or mixed" end
   return opts
 end
 
@@ -272,20 +340,36 @@ local function closeSession(s, now, reason)
   log("session %s (%s from %s:%d) closed: %s", s.sid, s.id, s.ip, s.port, reason)
 end
 
--- Resolution of every surface key, reported in the welcome as two sorted name lists (the datagram stays
--- small) and logged with the module's reason for each unsupported key.
+-- Resolution of every surface key through the routing policy (KB-15: the method decided per key, the
+-- route it selects now and the backend part that would press it), reported in the welcome as two sorted
+-- name lists (the datagram stays small) and logged per key at start. A route is usable only when the
+-- module reports it supported with no unavailable requirement; the reason is logged, never guessed.
 local function describeKeys(logReasons)
   local inst = hk()
-  local ok, unsupported, reasons = {}, {}, {}
+  local ok, unsupported, reasons, routes = {}, {}, {}, {}
   for name, logical in pairs(NXK_KEYS) do
     local supported, reason = false, "hardkeys module not loaded"
     if inst then
-      local okC, r = pcall(inst.describeKey, inst, logical, { prefer = NXK_PREFER[name] })
-      if okC and type(r) == "table" and r.supported then supported = true else reason = tostring(okC and (r and r.reason) or r) end
-      if supported and logReasons and r.prefer then log("key %s: %s resolved through the preferred row %s (%s)", name, logical, r.prefer, tostring(r.shortcut)) end
+      local okC, r = pcall(inst.describeRoute, inst, logical, { prefer = NXK_PREFER[name] })
+      if okC and type(r) == "table" then
+        -- The surface holds every key (press/release pairs), so a Quickey code needs KB-10 hold evidence.
+        local qc = r.method == "quickkey" and type(r.quickkeyCapabilities) == "table" and r.quickkeyCapabilities or nil
+        if r.supported and #(r.unavailable or {}) == 0 and qc and qc.hold == false then
+          reason = "Quickey code " .. tostring(r.quickkey) .. " has no KB-10 hold evidence" .. (qc.note and (" (" .. qc.note .. ")") or "") .. "; the surface holds every key, route it with shortcut"
+        elseif r.supported and #(r.unavailable or {}) == 0 then supported = true
+        elseif r.supported then reason = "unavailable: " .. table.concat(r.unavailable, "; ")
+        else reason = tostring(r.reason or r.code) end
+        routes[name] = { method = r.method, source = r.methodSource, effective = r.effective, backend = r.dispatchBackend, supported = supported }
+        if supported and logReasons then
+          local res = r.resolution
+          log("key %s: %s via %s (%s%s)%s", name, logical, tostring(r.method), tostring(r.dispatchBackend or r.backend or "no backend"),
+              r.effective and (", " .. tostring(r.effective)) or "", (res and res.prefer) and (" preferred row " .. tostring(res.prefer) .. " (" .. tostring(res.shortcut) .. ")") or "")
+        end
+      else reason = tostring(r) end
     end
     if supported then ok[#ok + 1] = name else unsupported[#unsupported + 1] = name; reasons[name] = reason end
   end
+  state.routes = routes
   for name in pairs(NXK_LOCAL) do unsupported[#unsupported + 1] = name; reasons[name] = "not a console key" end
   table.sort(ok); table.sort(unsupported)
   if logReasons then
@@ -332,7 +416,7 @@ local function openSession(obj, ip, port, now)
   state.byId[obj.id] = s
   log("session %s opened for %s (%s fw %s, surface gen %s) from %s:%d; %d key(s) physically down, not pressed", sid, obj.id, tostring(obj.surface), tostring(obj.fw), tostring(obj.gen), ip, port, #held)
   local welcome = { t = "welcome", v = PROTOCOL, nonce = obj.nonce, gen = state.gen, lease = DEFAULTS.leaseMs, hb = DEFAULTS.hbMs,
-                    keys = describeKeys(false), modules = state.moduleVersions, console = consoleInfo(), input = state.inputMode,
+                    keys = describeKeys(false), modules = state.moduleVersions, console = consoleInfo(), input = state.inputMode, backend = state.backendName,
                     plugin = VERSION, epoch = fb() and fb():epoch() or nil }
   sendToSession(s, welcome)
   s.lastFullAt = nil  -- the next tick sends a full state
@@ -716,6 +800,12 @@ local function detachHardkeys(reason, now)
       logerr("keeping unresolved record %s(%s) of session %s: %s", tostring(record.logical or "raw"), tostring(record.tupleKey), tostring(record.session), tostring(record.unresolved and record.unresolved.reason))
     end
     if #(r.records or {}) > 0 then logerr("%d unresolved release record(s) kept; they are adopted at the next start and released by  Plugin \"mtpnxk_surface\" \"recover\"", #r.records) end
+    -- KB-12: the Quickey bank record travels with the consumer like the unresolved records; the next
+    -- start re-verifies every owned object (adoptBank) and nothing on the console is touched here.
+    if type(r.bank) == "table" then
+      state.bankRecord = r.bank
+      log("bank record %s kept for the next start (%d code(s)); nothing on the console was changed", tostring(r.bank.id), #(r.bank.codes or {}))
+    end
   else
     -- dispose() raised (or returned nothing): the instance still owns its records, so it is kept in
     -- quarantine instead of being dropped. New input stays blocked until "recover" exports them.
@@ -743,6 +833,7 @@ local function exportQuarantine(t)
     record.keptAt, record.keptReason = t, "quarantine"
     state.unresolved[#state.unresolved + 1] = record
   end
+  if type(r.bank) == "table" then state.bankRecord = r.bank end
   log("quarantined instance exported %d record(s)", #(r.records or {}))
   state.quarantine = nil
   return true
@@ -775,6 +866,7 @@ local function serviceModules(now)
 end
 
 local function tick(now)
+  state.lastTickAt = now
   -- 1 + 2: deadlines and feedback before any packet.
   local released = serviceModules(now)
   if next(released) then for _, s in pairs(state.sessions) do pruneReleased(s, released) end end
@@ -864,6 +956,93 @@ end
 
 local enableInput  -- defined below; recover re-enables the requested input after a quarantine clears
 
+-------------------------------------------------------------------------------
+-- Quickey bank (KB-12) and backend adapters (KB-13/KB-15)
+-------------------------------------------------------------------------------
+local function logBank(prefix, b)
+  if type(b) ~= "table" then return end
+  if not b.provisioned then log("%s: no bank (%s)", prefix, tostring(b.note)); return end
+  log("%s: bank %s state=%s codes=%d (qualified %d, discovered %d) problems=%d quickeys from %d, executors page %d %d-%d show='%s'",
+    prefix, tostring(b.id), tostring(b.state), b.codeCount or 0, b.qualifiedCount or 0, b.discoveredCount or 0, b.problemCount or 0,
+    b.spec.quickeys.first, b.spec.executors.page, b.spec.executors.first, b.spec.executors.first + b.spec.executors.count - 1, tostring(b.show))
+  for _, p in ipairs(b.problems or {}) do logerr("%s: problem %s %s: %s", prefix, tostring(p.kind), tostring(p.index or p.executor or ""), tostring(p.detail)) end
+end
+
+-- At start: a record kept from the previous run is adopted (every object re-verified, nothing created).
+local function adoptKeptBank(t)
+  local inst, record = hk(), state.bankRecord
+  if not inst or type(record) ~= "table" then return end
+  if type(inst.adoptBank) ~= "function" then logerr("bank: a record is kept but the loaded module has no adoptBank()"); return end
+  local ok, r, err = pcall(inst.adoptBank, inst, record, t)
+  if not ok then logerr("bank adopt raised: %s; the record is kept", tostring(r)); return end
+  if not r then logerr("bank adopt refused [%s]: %s; the record is dropped (provision again with bank=...)", tostring(err and err.code), tostring(err and err.message)); state.bankRecord = nil; return end
+  state.bankRecord = nil
+  logBank("bank adopt", r)
+end
+
+-- The operator's plugin argument is the authorization (KB-12: never a surface request). A bank this
+-- plugin already owns on the same slots is verified and reused by the module; a different live bank
+-- is reported, not replaced.
+local function provisionBank(opts, t)
+  if not opts.bank then return end
+  local inst = hk()
+  if not inst then return end
+  if type(inst.provisionBank) ~= "function" then logerr("bank: the loaded hardkeys module has no Quickey bank (KB-12 needs 0.7.0 or newer)"); return end
+  local live = inst:bankStatus(t)
+  if live.provisioned then log("bank: %s is already live (state %s); the bank= argument is not applied", tostring(live.id), tostring(live.state)); return end
+  local spec = { authorized = true, quickeys = { first = opts.bank.quickeyFirst },
+                 executors = { page = opts.bank.page, first = opts.bank.executorFirst, count = opts.bank.executorCount },
+                 codes = opts.bankCodes or "qualified", label = "mtpnxk NX-K surface" }
+  local ok, r, err = pcall(inst.provisionBank, inst, spec, t)
+  if not ok then logerr("bank provision raised: %s", tostring(r)); return end
+  if not r then
+    logerr("bank provision refused [%s]: %s", tostring(err and err.code), tostring(err and err.message))
+    for _, rf in ipairs(err and err.refusals or {}) do logerr("bank provision: %s %s: %s", tostring(rf.reason), tostring(rf.index or rf.executor or ""), tostring(rf.detail)) end
+    return
+  end
+  log("bank provision: %d Quickey(s) created, %d reused", r.created or 0, r.reused or 0)
+  logBank("bank provision", r)
+end
+
+local function adapterFor(kind)
+  local rec = state.modules.hardkeys
+  local HK, inst = rec and rec.module, rec and rec.instance
+  if not inst then return nil, "the hardkeys module is not loaded" end
+  rec.adapters = rec.adapters or {}
+  local a = rec.adapters
+  if kind == "fake" then
+    a.fake = a.fake or HK.fakeBackend(); return a.fake
+  elseif kind == "keyboard" then
+    a.keyboard = a.keyboard or HK.keyboardBackend(HK.consoleDeps(_G), { defaultDisplay = state.display }); return a.keyboard
+  elseif kind == "quickey" then
+    if type(HK.quickeyBackend) ~= "function" then return nil, "the loaded hardkeys module has no quickeyBackend() (KB-13 needs 0.8.0 or newer)" end
+    a.quickey = a.quickey or HK.quickeyBackend(inst); return a.quickey
+  elseif kind == "mixed" then
+    if type(HK.mixedBackend) ~= "function" then return nil, "the loaded hardkeys module has no mixedBackend() (KB-15 needs 0.10.0 or newer)" end
+    if not a.mixed then
+      local q, qerr = adapterFor("quickey"); if not q then return nil, qerr end
+      local k = adapterFor("keyboard")
+      a.mixed = HK.mixedBackend({ quickey = q, keyboard = k })
+    end
+    return a.mixed
+  end
+  return nil, "unknown backend '" .. tostring(kind) .. "'"
+end
+
+-- The routing policy goes with the backend (KB-11/KB-15). Keyboard and fake keep the module default
+-- (shortcut) unless the operator overrides single keys; quickey is quickkey only; mixed is the explicit
+-- per-key table above plus the operator's overrides.
+local function routingFor(mode, overrides)
+  if mode == "mixed" then return mixedPolicy(overrides) end
+  if mode == "quickey" then return quickeyPolicy(overrides) end
+  if overrides and next(overrides) then
+    local keys = {}
+    for logical, method in pairs(overrides) do keys[logical] = { method = method } end
+    return { default = "shortcut", keys = keys }
+  end
+  return nil
+end
+
 -- Operator recovery: re-attempt every unresolved release (adopted or current). Without input enabled
 -- the keyboard backend is attached for cleanup only; input stays as configured.
 local function recoverUnresolved()
@@ -889,11 +1068,21 @@ local function recoverUnresolved()
     end
   end
   local st = inst:status(t)
-  if not st.backend.attached then
-    local HK = rec.module
-    local a, err = inst:attachBackend(HK.keyboardBackend(HK.consoleDeps(_G), { defaultDisplay = state.display }))
-    if not a then logerr("recover: could not attach the keyboard backend for cleanup: %s", tostring(err and err.message)); return end
-    log("recover: keyboard backend attached for cleanup only (input stays %s)", tostring(state.inputMode))
+  if not (st.backend and st.backend.dispatches) then
+    -- Records name the part that pressed them (KB-15): keyboard and quickey records together need the
+    -- mixed adapter, one kind its own backend; a record is only ever released through the backend that
+    -- pressed it.
+    local kinds, wanted = {}, nil
+    for _, h in ipairs(st.holds or {}) do if h.state ~= "released" and type(h.backend) == "string" then kinds[h.backend] = true end end
+    if kinds.keyboard and kinds.quickey then wanted = "mixed"
+    elseif kinds.quickey then wanted = "quickey"
+    elseif kinds.fake then wanted = "fake"
+    else wanted = "keyboard" end
+    local adapter, aerr = adapterFor(wanted)
+    if not adapter then logerr("recover: cannot attach the %s backend for cleanup: %s; the records stay reserved", wanted, tostring(aerr)); return end
+    local a, err = inst:attachBackend(adapter)
+    if not a then logerr("recover: could not attach the %s backend for cleanup: %s", wanted, tostring(err and err.message)); return end
+    log("recover: %s backend attached for cleanup only (input stays %s)", wanted, tostring(state.inputMode))
   end
   local r = inst:recover(nil, t)
   for _, a in ipairs(r.released or {}) do log("recover: released %s(%s) of session %s", tostring(a.logical or "raw"), tostring(a.tupleKey), tostring(a.session)) end
@@ -918,15 +1107,48 @@ enableInput = function(mode, force)
     state.inputMode = "off"
     return false
   end
-  local HK = state.modules.hardkeys.module
-  local adapter
-  if mode == "fake" then adapter = HK.fakeBackend()
-  else adapter = HK.keyboardBackend(HK.consoleDeps(_G), { defaultDisplay = state.display }) end
-  local r, err = inst:enableInput(adapter)
-  if not r then logerr("enableInput failed: %s", tostring(err and err.message)); state.inputMode = "off"; return false end
+  if mode == "quickey" or mode == "mixed" then
+    -- KB-15: Quickey dispatch needs the explicit bank setup; without it the start reports the
+    -- requirement and presses nothing (never a silent fall back to Keyboard()).
+    local b = inst:bankStatus(now())
+    if not b.provisioned then
+      logerr("input %s requested but no Quickey bank is provisioned: start with  bank=<quickey>/<page>.<first>-<last>  (KB-12; 12 reserved executors) or use input=keyboard", mode)
+      state.inputMode = "off"
+      return false
+    end
+    if b.state ~= "ready" then
+      logerr("input %s requested but the Quickey bank %s is %s (%d problem(s)); run  Plugin \"mtpnxk_surface\" \"bank verify\"  or tear it down and provision again", mode, tostring(b.id), tostring(b.state), b.problemCount or 0)
+      state.inputMode = "off"
+      return false
+    end
+  end
+  local adapter, aerr = adapterFor(mode)
+  if not adapter then logerr("input %s: %s", mode, tostring(aerr)); state.inputMode = "off"; return false end
+  local r, err = inst:enableInput(adapter, { routing = routingFor(mode, state.routeOverrides) })
+  if not r then
+    logerr("enableInput failed [%s]: %s", tostring(err and err.code), tostring(err and err.message))
+    state.inputMode = "off"
+    return false
+  end
+  -- Operator overrides must select a usable route now (KB-15: inert configuration is refused).
+  for logical, method in pairs(state.routeOverrides or {}) do
+    local name
+    for n, l in pairs(NXK_KEYS) do if l == logical then name = n; break end end
+    local okD, d = pcall(inst.describeRoute, inst, logical, { prefer = NXK_PREFER[name or ""] })
+    local usable = okD and type(d) == "table" and d.supported and #(d.unavailable or {}) == 0
+    if usable and method == "quickkey" and type(d.quickkeyCapabilities) == "table" and d.quickkeyCapabilities.hold == false then usable = false; d.reason = "no KB-10 hold evidence for " .. tostring(d.quickkey) end
+    if not usable then
+      logerr("route %s:%s cannot be served now (%s); the override is refused and input stays off", tostring(name or logical), method,
+             okD and type(d) == "table" and (d.reason or (d.unavailable and table.concat(d.unavailable, "; ")) or d.code) or tostring(d))
+      pcall(inst.disableInput, inst, now(), "route-refused")
+      state.inputMode = "off"
+      return false
+    end
+  end
   state.inputEnabled = true
   state.adapter = adapter
-  log("input enabled on the %s backend", mode)
+  state.backendName = adapter.name
+  log("input enabled on the %s backend (routing default %s, %d override(s))", adapter.name, tostring(r.routing and r.routing.default), r.routing and r.routing.overrides or 0)
   return true
 end
 
@@ -943,7 +1165,7 @@ end
 local function describe()
   local n = 0
   for _ in pairs(state.sessions or {}) do n = n + 1 end
-  return fmt("running=%s bind=%s:%d input=%s sessions=%d gen=%s", tostring(state.running), tostring(state.host), tonumber(state.port) or 0, tostring(state.inputMode), n, tostring(state.gen))
+  return fmt("running=%s bind=%s:%d input=%s backend=%s sessions=%d gen=%s", tostring(state.running), tostring(state.host), tonumber(state.port) or 0, tostring(state.inputMode), tostring(state.backendName), n, tostring(state.gen))
 end
 
 local function serverMain()
@@ -996,9 +1218,13 @@ local function start(opts)
   end
   state.commandText = function() return CmdObj().cmdtext end
   state.inputRequested, state.forceRequested = opts.input, opts.force
+  state.routeOverrides = opts.routes
+  state.backendName = nil
   local t = now()
   if exportQuarantine(t) then
     adoptKept(t)
+    adoptKeptBank(t)
+    provisionBank(opts, t)
     enableInput(opts.input, opts.force)
   else
     state.inputMode, state.inputEnabled = "off", false
@@ -1017,8 +1243,44 @@ local function MainImpl(display_handle, argument)
     return
   end
   if opts.command == "recover" then recoverUnresolved(); return end
+  if opts.command and opts.command:match("^bank%-") then
+    local inst = hk()
+    if not inst then
+      if state.bankRecord then log("bank: not running; a bank record %s is kept and is adopted at the next start", tostring(state.bankRecord.id)) else log("bank: not running, no bank record kept") end
+      return
+    end
+    local t = now()
+    if opts.command == "bank-status" then logBank("bank status", inst:bankStatus(t))
+    elseif opts.command == "bank-verify" then
+      local ok, r, err = pcall(inst.verifyBank, inst, t)
+      if not ok then logerr("bank verify raised: %s", tostring(r)) elseif not r then logerr("bank verify refused [%s]: %s", tostring(err and err.code), tostring(err and err.message)) else logBank("bank verify", r) end
+    else
+      local ok, r, err = pcall(inst.teardownBank, inst, t, { authorized = true })
+      if not ok then logerr("bank teardown raised: %s", tostring(r))
+      elseif not r then logerr("bank teardown refused [%s]: %s", tostring(err and err.code), tostring(err and err.message))
+      else
+        state.bankRecord = nil
+        log("bank teardown: %d Quickey(s) removed, %d executor(s) cleared, %d skipped; state %s", #(r.removed or {}), #(r.cleared or {}), #(r.skipped or {}), tostring(r.state))
+        for _, sk in ipairs(r.skipped or {}) do logerr("bank teardown: skipped %s: %s", tostring(sk.index or sk.executor), tostring(sk.reason)) end
+        if state.inputEnabled and (state.inputMode == "quickey" or state.inputMode == "mixed") then
+          logerr("bank teardown: input %s has no bank any more; Quickey routes are refused until a bank is provisioned (restart with bank=...)", state.inputMode)
+        end
+      end
+    end
+    return
+  end
   if opts.command == "status" then
     log("%s", describe())
+    local inst0 = hk()
+    if inst0 then
+      local okR, rr = pcall(inst0.routingReport, inst0)
+      if okR and type(rr) == "table" then log("routing: default %s (%s), %d override(s), backend %s", tostring(rr.default), tostring(rr.defaultSource), rr.overrideCount or 0, tostring(rr.backend)) end
+      logBank("bank", inst0:bankStatus(now()))
+      for _, name in ipairs((function() local l = {} for n in pairs(state.routes or {}) do l[#l + 1] = n end table.sort(l) return l end)()) do
+        local r = state.routes[name]
+        log("route %s: %s via %s%s%s", name, tostring(NXK_KEYS[name]), tostring(r.method), r.backend and (" (" .. tostring(r.backend) .. ")") or "", r.supported and "" or " UNSUPPORTED: " .. tostring(state.keyReasons and state.keyReasons[name]))
+      end
+    elseif state.bankRecord then log("bank record %s kept (not running)", tostring(state.bankRecord.id)) end
     if state.unresolved and #state.unresolved > 0 then log("%d unresolved record(s) kept from a previous run (not adopted yet)", #state.unresolved) end
     if state.quarantine then logerr("a previous instance is quarantined (%s: %s); input is blocked until  recover  exports its records", tostring(state.quarantine.reason), tostring(state.quarantine.error)) end
     local inst = hk()
@@ -1037,7 +1299,20 @@ local function MainImpl(display_handle, argument)
     end
     return
   end
-  if state.running then log("already running (%s); use \"stop\" first", describe()); return end
+  if state.running then
+    -- A ReloadAllPlugins (or Delete Plugin) kills the running coroutine without running its shutdown:
+    -- the shared state stays "running" with the socket bound and the module instances alive. A loop
+    -- that has not ticked for a second is not coming back, so this chunk takes its state over: holds
+    -- are released through the old instances, their records and the bank record are kept, the socket is
+    -- closed. A loop that still ticks is left alone.
+    local t = now()
+    local idle = state.lastTickAt and (t - state.lastTickAt) or nil
+    if idle ~= nil and idle < 1.0 then log("already running (%s); use \"stop\" first", describe()); return end
+    logerr("a previous run is marked running but its loop has not ticked for %s (reloaded plugin?); taking over its state", idle and string.format("%.1f s", idle) or "an unknown time (no tick recorded)")
+    if state.sock then pcall(function() state.sock:close() end); state.sock = nil end
+    disposeAll("stale-run")
+    state.running, state.stopRequested = false, false
+  end
   if not start(opts) then state.running = false; return end
   serverMain()
 end

@@ -8,8 +8,10 @@ key routes, ownership and leases, read-only state readers. The surface plugin
 
 | Component | Version | Module API | Copied from |
 | --- | --- | --- | --- |
-| `gma3_mcp_hardkeys` | 0.5.0 | 1 | `2d226dd` (PR #12, merged into `main` as `6e0d9c1`: generic VirtualKeyCode resolution and `prefer` for same-target ties); sha256 `d73a8e10a53260275b9bf45b9182cb5601b48843646ec1812376ff1095f6266e` |
-| `gma3_mcp_feedback` | 0.2.0 | 1 | `c18559a` (unchanged through `6e0d9c1`); sha256 `349bb2ed1cc88bdbaf197aa20e957811df44306133c04652663da01a585d2cf9` |
+| `gma3_mcp_hardkeys` | 0.10.0 | 1 | `3960334` (branch `feat/kb15-mixed-backend`, pinned there as `e03615d`: KB-12 Quickey bank, KB-13 owned-Quickey backend, KB-14 scoped shortcut-mode changes and text routes, KB-15 mixed backend); sha256 `a57ebd29af3b2c7e9e06ef3dcd8b7059c775db83b0dc61760f49e75973cc7dc3` |
+| `gma3_mcp_feedback` | 0.2.0 | 1 | `c18559a` (unchanged through `3960334`); sha256 `349bb2ed1cc88bdbaf197aa20e957811df44306133c04652663da01a585d2cf9` |
+
+Previous pin: hardkeys 0.5.0 `d73a8e10…` (PR #12, `6e0d9c1`), used by the KB-07/KB-08 records.
 
 Upstream's `plugin/modules.lock.json` carries the same hashes. Check them before
 packaging (`shasum -a 256 tools/ma3/gma3_mcp_*.lua`): the version strings alone do

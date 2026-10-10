@@ -66,6 +66,66 @@
 --     (a dispatch raised or a release stayed unresolved) or unattempted; a failure stops the sequence,
 --     releases what it pressed and never replays anything. A sequence owns an interaction (given or
 --     begun for it) and at most one runs per instance.
+--   * routing policy (KB-11, 0.6.0): a consumer chooses one default dispatch METHOD and overrides it
+--     per logical key (opts.routing at new(), configureRouting() later). Methods: quickkey, shortcut,
+--     shortcutOrType, type. The decision is made and validated before dispatch, stored on the hold and
+--     kept for the whole press/release cycle; an unavailable or refused route never selects another
+--     method, and a configuration change never changes the route a live hold is released with.
+--     describeRoute(name) reports the configured method, the effective route, the backend capabilities
+--     and every unavailable requirement; status().routing summarises the policy. Callers without a
+--     policy keep the pre-0.6.0 behaviour (method "shortcut"). Quickey tuples ({ quickkey = <code> })
+--     need an adapter that advertises capabilities.quickkey (the fake does; the KB-13 backend will);
+--     the text routes of shortcutOrType/type are dispatched since 0.9.0 (KB-14, below).
+--   * scoped shortcut-mode changes and text routes (KB-14, 0.9.0): a shortcut-table route while
+--     shortcuts are off (method shortcut) and the text routes (type, the text side of shortcutOrType)
+--     are dispatched through a bounded MODE OPERATION: the active profile and the shortcut state are
+--     captured (refused if unreadable), the state is written only when it differs from what the route
+--     needs, verified by readback, kept for the whole lifecycle of every hold that depends on it and
+--     restored by service() one restore delay after the last dependent event (never in the same call as
+--     the last key event: the console consumes a modifier press on the next frame and discards it when
+--     the mode is restored in the same chunk; disabling shortcuts also drops a held MA). Before the
+--     restore the profile and the state are re-read: a changed profile or an unreadable state is
+--     INTERFERENCE and the operation becomes an unresolved RESTORATION (status().modeChange, busy
+--     reason "restoration") that blocks every new press until recover() verifies and restores it; a
+--     replacement profile is never written, and a state the operator already set back is left alone.
+--     Text routes insert the key's text once on press (chunked, the state rechecked between chunks,
+--     partial progress reported, nothing replayed) and nothing on release; the record is "retained"
+--     until the mode is restored (or "quarantined" when the restoration went unresolved) and refuses
+--     every other instance-owned record meanwhile. Abrupt termination and changes nobody can observe
+--     from Lua (another plugin writing the same property between two reads) defeat the guarantee.
+--   * Quickey bank (KB-12, 0.7.0): provisionBank(spec, now) creates one owned Quickey per command-area
+--     hardkey code in an operator-selected pool range and reserves an executor range for holds (KB-10:
+--     press/release needs the Quickey on an executor). Codes are discovered from Enums.VirtualKeyCode,
+--     aliases deduplicated, exclusions reported, and each code carries its KB-10 qualification.
+--     Ownership is the marker written into the Quickey's Note plus the matching Code/Name, re-read
+--     before every mutation and before every dispatch (bankTarget/bankExecutor); nothing is overwritten,
+--     repaired or deleted unless it verifies, and nothing is created or deleted without
+--     spec.authorized == true (the consumer's explicit operator decision). verifyBank() re-reads all,
+--     service() marks the bank stale on a show/data-pool change, teardownBank() removes only verified
+--     owned objects and refuses while Quickey records are live, dispose() hands the record back for
+--     adoptBank(). A second owner on the same slots is rejected (no shared arbitration yet).
+--   * owned-Quickey backend (KB-13, 0.8.0): quickeyBackend(instance) dispatches Quickey tuples through
+--     the instance's bank. A Quickey addressed directly is always a complete tap (KB-10), so every tap,
+--     hold and chord is an EXECUTOR press: right before the press the code's Quickey is re-read through
+--     bankTarget(), a free reserved executor is re-read through bankExecutor(), the Quickey is assigned
+--     to it when needed (verified by readback) and "Press Page P.E" is issued; the release issues
+--     "Unpress Page P.E" on the RECORDED executor only, and only while it still holds the recorded
+--     Quickey (index, marker, Code). Nothing is re-resolved for a release, a direct "Unpress Quickey"
+--     is never issued (it re-activates non-latching keys), and an executor emptied, reassigned or
+--     deleted during a hold leaves the record unresolved for the operator and recover(). The recorded
+--     target travels with the hold (dispose() records, adopt()), so a restart releases through the
+--     same executor. Only codes with KB-10 evidence are dispatched, each with its own tap/hold/chord
+--     flags; discovered-only codes are refused before dispatch. No PC-key or text dispatch.
+--   * mixed backend (KB-15, 0.10.0): mixedBackend({ quickey = <adapter>, keyboard = <adapter> }) serves
+--     both kinds of tuple on one instance, so a consumer can default its keys to quickkey (after the
+--     explicit KB-12 bank setup) and override single keys to shortcut / shortcutOrType / type. Each record
+--     remembers the PART that pressed it (hold.backend = "quickey" | "keyboard"), so releases, restarts
+--     and recover() go through the same part, and an unavailable Quickey route (no bank, discovered-only
+--     code) stays a refusal: nothing falls back to Keyboard(). The two mechanisms press the console's own
+--     keys and the shortcut mode is one profile property, and their interplay is NOT qualified, so the
+--     instance refuses (unqualified-mix, on every backend) a Quickey next to a live PC-key record and the
+--     reverse, a combo or sequence that would put both kinds down at once, a Quickey while a temporary
+--     shortcut-mode change is active, and a mode change while a Quickey is down.
 --
 -- Ownership semantics (KB-01/KB-03 findings): the console's key state is shared. A physical release
 -- can end a synthetic hold and MASTATE is aggregate, so an ownership record here means "this session is
@@ -89,7 +149,7 @@
 --   * Input is disabled on a new instance. enableInput(adapter) is the operator's explicit decision.
 
 local NAME        = "gma3_mcp_hardkeys"
-local VERSION     = "0.5.0"
+local VERSION     = "0.10.0"
 local API_VERSION = 1
 
 -- Logical keys with special handling in describeKey() and press(). Since 0.5.0 every other
@@ -121,18 +181,57 @@ local KEYBOARD_LIMITATIONS = {
   "input is not display-scoped on 2.5.1: the display argument must exist but does not route input, focus or pop-up placement",
   "no per-key readback exists; Root().MASTATE is aggregate (any Shift source), so a release is reported as dispatched, never confirmed, and MASTATE is reported separately",
   "injected and physical input share one key state: a physical release ends an injected hold and vice versa; ownership records responsibility, not console state",
-  "a remapped or disabled shortcut during a hold prevents the stored-tuple release until the operator restores the route; the module never changes mappings or toggles F10",
+  "a remapped or disabled shortcut during a hold prevents the stored-tuple release until the operator restores the route; the module never changes mappings and changes the shortcut mode only for its own bounded KB-14 operations (captured, verified by readback, restored by service())",
   "invalid arguments are accepted silently by onPC; validation happens here before dispatch and a no-error return is not evidence of effect",
   "double-press is unsupported; a long-press is promised only as an exclusive hold with no other key down",
   "text goes to whatever the console has focused: a text field with shortcuts enabled, or the command line only while shortcuts are disabled; focus is not observable from Lua and only the command line can be read back",
+  "no Quickey dispatch: the routing method quickkey needs the owned-Quickey backend (quickeyBackend(), KB-13)",
+  "a temporary shortcut-mode change (KB-14) is one profile property write verified by readback; it is not a lock: physical keys, other plugins and another console user can change the mode or the profile meanwhile, which stops the operation and leaves the restoration unresolved for recover()",
+}
+
+-- What the owned-Quickey backend can and cannot promise (KB-10/KB-12/KB-13 evidence, onPC 2.5.1.0).
+local QUICKEY_LIMITATIONS = {
+  "every event goes through the KB-12 bank: a code is dispatched only when its owned Quickey re-reads as the bank's (show identity, marker, Code, Name) right before the press; a missing, changed or replaced object refuses and nothing is repaired",
+  "only codes with KB-10 evidence are dispatched (NUM1, NUM5, THRU, FIXTURE, PLEASE, CLEAR, STORE, MA1, OOPS), each only for the operations evidenced for it (tap / hold / chord); discovered-only codes are refused before dispatch",
+  "a Quickey addressed directly is always a complete tap (KB-10), so every tap, hold and chord is an executor press: the code's Quickey is assigned to a reserved executor and Press / Unpress Page P.E is issued; one reserved executor per concurrently held key",
+  "no per-key readback exists: a press and a release are reported as dispatched, never confirmed; only the aggregate MASTATE is observable (MA1)",
+  "a release is issued only on the recorded executor and only while it still holds the recorded Quickey; an executor emptied, reassigned or deleted during a hold leaves the key down on the console and the record unresolved until the operator restores the assignment and recovery runs; a direct Unpress Quickey is never issued (it re-activates non-latching keys)",
+  "effects are synchronous in the issuing chunk, except that with the Edit Command pop-up or another text field focused digits land one frame after keywords and all text keys go to the focused field (KB-10); nothing here reads the command line",
+  "OOPS on an empty command line is Undo (it reverts show data) and PLEASE executes the command line; neither is checked or prevented here",
+  "no PC-key or text dispatch and no mode change (capabilities.keyboard = false, char = false, modeChange = false): the shortcut, shortcutOrType and type methods are unavailable on this backend",
+}
+
+-- What the mixed backend (KB-15) adds to the limitations of its two parts.
+local MIXED_LIMITATIONS = {
+  "two console mechanisms on one instance: Quickey tuples go through the owned-Quickey part (executor presses of the KB-12 bank), PC keys and character events through the Keyboard() part; each record is released, recovered and adopted through the part that pressed it",
+  "their interplay is not qualified (KB-15): a Quickey next to a live PC-key record and the reverse, a combo or sequence putting both kinds down at once, a Quickey while a temporary shortcut-mode change is active and a mode change while a Quickey is down are refused before dispatch (unqualified-mix); nothing is substituted",
+  "an unavailable Quickey route (no bank, partial bank, code not in the bank, discovered-only code) is a refusal naming the requirement; it never falls back to the Keyboard() part",
+  "both parts press the console's own keys: a physical key, another plugin or another console user can interfere with either, and neither part can observe a single key",
 }
 
 local BACKENDS = {
+  mixed = {
+    name = "mixed",
+    description = "mixed backend (KB-15): Quickey tuples through the owned-Quickey part, PC keys and characters through the Keyboard() part, on one instance; console keys are really pressed",
+    requires = {},
+    dispatches = true,
+    capabilities = { keyboard = true, quickkey = { tap = true, hold = true, chord = true }, char = true, modeChange = true },
+    limitations = MIXED_LIMITATIONS,
+  },
+  quickey = {
+    name = "quickey",
+    description = "owned-Quickey backend: Quickey tuples pressed and released through the instance's KB-12 bank on reserved executors (Assign Quickey N At Page P.E, Press / Unpress Page P.E); console keys are really pressed",
+    requires = {},
+    dispatches = true,
+    capabilities = { keyboard = false, quickkey = { tap = true, hold = true, chord = true }, char = false, modeChange = false },
+    limitations = QUICKEY_LIMITATIONS,
+  },
   keyboard = {
     name = "keyboard",
     description = "Keyboard(): PC-key emulation with explicit per-event modifiers, routed through the operator's UserProfile shortcut table or a verified native route; console keys are really pressed",
     requires = { "Keyboard" },
     dispatches = true,
+    capabilities = { keyboard = true, quickkey = false, char = true, modeChange = true },
     limitations = KEYBOARD_LIMITATIONS,
   },
   fake = {
@@ -140,6 +239,7 @@ local BACKENDS = {
     description = "in-memory fake: records events and simulates aggregate console key state; nothing reaches the console",
     requires = {},
     dispatches = true,
+    capabilities = { keyboard = true, quickkey = { tap = true, hold = true, chord = true }, char = true, modeChange = true },
     limitations = { "nothing reaches a console key; lifecycle behaviour only" },
   },
 }
@@ -166,6 +266,8 @@ local DEFAULT_CONFIG = {
   -- consumer that is itself the only caller (a surface plugin pressing keys as they arrive) keeps the
   -- KB-03 per-session ownership rules; interactions and sequences still work and still lock the instance.
   requireInteraction = true,
+  bankCheckMs        = 2000,    -- how often service() re-reads the show identity to invalidate the Quickey bank (KB-12)
+  modeRestoreDelayMs = 60,      -- KB-14: how long after the last dependent key event service() waits before restoring the shortcut mode (the console consumes queued key events on the next frame; the KB-14 timing probe saw effects within 14-73 ms)
 }
 
 -- Text policy (KB-05). Input is UTF-8 and is iterated by code point, never by byte. Control characters
@@ -193,6 +295,126 @@ local function validateText(text, maxChars)
     cps[#cps + 1] = cp
   end
   return cps
+end
+
+-- Routing policy (KB-11, 0.6.0) ------------------------------------------------
+--
+-- A consumer chooses how its logical keys are dispatched: one default method plus per-key overrides.
+-- The four methods of KEYBOARD.md ("Configurable hardkey dispatch and Quickey migration"):
+--   quickkey        activate the owned Quickey carrying the key's VirtualKeyCode (KB-10 evidence). Needs
+--                   an adapter advertising capabilities.quickkey (KB-13); the fake backend simulates it.
+--   shortcut        resolve the key's shortcut-table/fixed/native route and press the PC key: the
+--                   behaviour every caller had before 0.6.0 and the module default. A shortcut-table
+--                   route while shortcuts are off temporarily enables them for the hold (KB-14, 0.9.0)
+--                   when the backend can change the mode; otherwise it is refused, never toggled.
+--   shortcutOrType  the shortcut route when shortcuts are positively enabled and resolution succeeds;
+--                   the key's explicit text mapping when shortcuts are positively off, or when the table
+--                   was read and confirms that no row maps the key (shortcuts are then temporarily
+--                   disabled for the insertion). Unreadable state, ambiguity, collisions and admission
+--                   failures refuse; they never select text.
+--   type            the key's explicit text mapping, inserted once on press, with shortcuts temporarily
+--                   disabled when they are on (KB-14, 0.9.0).
+-- The method is decided and validated before dispatch and stored on the hold: a configuration or mode
+-- change during a hold never changes the route its release uses, and an unavailable or refused route
+-- never falls back to another method or backend.
+local METHODS = { quickkey = true, shortcutOrType = true, shortcut = true, type = true }
+local METHOD_LIST = { "quickkey", "shortcutOrType", "shortcut", "type" }
+local DEFAULT_METHOD = "shortcut"
+
+-- Requirements a route may be missing on the attached backend (KB-14). They are reported by name so a
+-- consumer can tell which capability the backend lacks; nothing is emulated.
+local NEED_CHAR = "text-route dispatch needs character events (capabilities.char); backend lacks them (KB-14)"
+local NEED_MODE = "temporary keyboard-shortcut enable/disable needs a backend that can change the mode (capabilities.modeChange: deps.setShortcutsActive); backend lacks it, nothing is toggled (KB-14)"
+
+-- Keys that never get a text mapping (KB-11): they are actions, not characters. Executor, X-key,
+-- encoder and default-executor codes are matched by pattern. Text for any other key is never derived
+-- from the key name; the consumer configures it explicitly.
+local TEXT_FORBIDDEN = { MA = true, MA1 = true, MA2 = true, PLEASE = true, CLEAR = true, OOPS = true, UNDO = true, ESC = true,
+                         EXEC = true, EXECUTOR = true, XKEYS = true, FADER = true }
+local TEXT_FORBIDDEN_PATTERNS = { "^X%d+$", "^ENCODER_", "^DEF_" }
+local function textForbidden(key)
+  if TEXT_FORBIDDEN[key] then return true end
+  for _, p in ipairs(TEXT_FORBIDDEN_PATTERNS) do if key:match(p) then return true end end
+  return false
+end
+
+-- Validates a consumer routing policy and returns a normalised copy, or nil, { code, message, key }.
+-- policy = { default = <method>|nil, keys = { <LOGICAL> = { method, quickkey, prefer, text } } }.
+-- Logical key identity (the table key), Quickey code, shortcut preference and literal text stay
+-- distinct fields; nothing is derived from the key name except that quickkey defaults to it at
+-- resolution time. A digit's text is exactly one character with no whitespace; keyword text is used
+-- exactly as given, separators included (the module adds none).
+local function validateRoutingPolicy(policy, maxTextChars)
+  if policy == nil then policy = {} end
+  if type(policy) ~= "table" then return nil, { code = "policy-invalid", message = "routing policy must be a table { default, keys }" } end
+  for k in pairs(policy) do
+    if k ~= "default" and k ~= "keys" then return nil, { code = "policy-invalid", message = "unknown routing policy field '" .. tostring(k) .. "' (fields: default, keys)" } end
+  end
+  local out = { default = DEFAULT_METHOD, defaultExplicit = false, keys = {} }
+  if policy.default ~= nil then
+    if type(policy.default) ~= "string" or not METHODS[policy.default] then
+      return nil, { code = "policy-invalid", message = "unknown dispatch method '" .. tostring(policy.default) .. "' (methods: " .. table.concat(METHOD_LIST, ", ") .. ")" }
+    end
+    out.default, out.defaultExplicit = policy.default, true
+  end
+  if policy.keys ~= nil then
+    if type(policy.keys) ~= "table" then return nil, { code = "policy-invalid", message = "routing policy keys must be a table keyed by logical key name" } end
+    for name, entry in pairs(policy.keys) do
+      if type(name) ~= "string" or name == "" then return nil, { code = "policy-invalid", message = "routing policy key names must be non-empty strings" } end
+      local key = name:upper()
+      if out.keys[key] then return nil, { code = "policy-invalid", message = "logical key " .. key .. " is configured twice (names are case-insensitive)", key = key } end
+      if type(entry) ~= "table" then return nil, { code = "policy-invalid", message = "routing entry for " .. key .. " must be a table { method, quickkey, prefer, text }", key = key } end
+      local e = {}
+      for f, v in pairs(entry) do
+        if f == "method" then
+          if type(v) ~= "string" or not METHODS[v] then return nil, { code = "policy-invalid", message = key .. ": unknown dispatch method '" .. tostring(v) .. "' (methods: " .. table.concat(METHOD_LIST, ", ") .. ")", key = key } end
+          e.method = v
+        elseif f == "quickkey" then
+          if type(v) ~= "string" or v == "" then return nil, { code = "policy-invalid", message = key .. ": quickkey must be an Enums.VirtualKeyCode name (non-empty string)", key = key } end
+          e.quickkey = v:upper()
+        elseif f == "prefer" then
+          if type(v) ~= "string" or v == "" then return nil, { code = "policy-invalid", message = key .. ": prefer must be a PC key name (non-empty string)", key = key } end
+          e.prefer = v
+        elseif f == "text" then
+          if type(v) ~= "string" or v == "" then return nil, { code = "policy-invalid", message = key .. ": text must be a non-empty string; it is inserted exactly as given, separators included", key = key } end
+          if textForbidden(key) then
+            return nil, { code = "policy-invalid", message = key .. ": no text mapping is allowed for MA, PLEASE, CLEAR, OOPS, ESC, executor, X-key or encoder keys; they are actions, not characters", key = key }
+          end
+          local cps, reason = validateText(v, maxTextChars)
+          if not cps then return nil, { code = "policy-invalid", message = key .. ": text mapping refused: " .. tostring(reason), key = key } end
+          if key:match("^NUM%d$") and (#cps ~= 1 or v:find("%s")) then
+            return nil, { code = "policy-invalid", message = key .. ": a digit maps to exactly one character with no spaces (got " .. #cps .. " characters)", key = key }
+          end
+          e.text, e.textChars = v, #cps
+        else
+          return nil, { code = "policy-invalid", message = key .. ": unknown routing field '" .. tostring(f) .. "' (fields: method, quickkey, prefer, text)", key = key }
+        end
+      end
+      out.keys[key] = e
+    end
+  end
+  return out
+end
+
+-- What an adapter can dispatch (KB-11). An adapter advertises `capabilities`; one without the field is
+-- a PC-key adapter (every adapter before 0.6.0). Keys:
+--   keyboard   PC-key tuples (shortcut-table, fixed, native and raw routes)
+--   quickkey   { tap, hold, chord } Quickey tuples addressed by VirtualKeyCode name (KB-13; the fake simulates it)
+--   char       character events (KB-05 text steps, KB-14 text routes)
+--   modeChange the keyboard-shortcut mode may be changed temporarily for a route (KB-14); the write
+--              itself goes through deps.setShortcutsActive, the flag says the backend's events are the
+--              console's own keys so a mode change is meaningful (false on the owned-Quickey backend)
+local function adapterCapabilities(adapter)
+  if type(adapter) ~= "table" then return nil end
+  local caps = adapter.capabilities
+  if type(caps) ~= "table" then
+    return { keyboard = true, quickkey = false, char = type(adapter.char) == "function", modeChange = false }
+  end
+  local q = caps.quickkey
+  return { keyboard = caps.keyboard and true or false,
+           quickkey = type(q) == "table" and { tap = q.tap and true or false, hold = q.hold and true or false, chord = q.chord and true or false } or false,
+           char = (caps.char or type(adapter.char) == "function") and true or false,
+           modeChange = caps.modeChange and true or false }
 end
 
 -- Pure helpers ---------------------------------------------------------------
@@ -251,21 +473,21 @@ end
 -- decides on enablement; resolve() only reports the route and its validity.
 local function resolve(rows, vkCodes, name, opts)
   local key = type(name) == "string" and name:upper() or nil
-  if not key then return { key = tostring(name), supported = false, reason = "key name must be a string" } end
-  if UNSUPPORTED_KEYS[key] then return { key = key, supported = false, reason = UNSUPPORTED_KEYS[key] } end
+  if not key then return { key = tostring(name), supported = false, code = "bad-key", reason = "key name must be a string" } end
+  if UNSUPPORTED_KEYS[key] then return { key = key, supported = false, code = "unsupported-key", reason = UNSUPPORTED_KEYS[key] } end
   local def = LOGICAL_KEYS[key]
   -- Any other Enums.VirtualKeyCode name (EDIT, COPY, HIGHLIGHT, ...) resolves through the shortcut table
   -- like STORE does (0.5.0, for surface consumers whose keys go beyond the fixed list). The fixed (MA) and
   -- native (PLEASE) routes stay special; a name the console's enum does not know is unsupported, never guessed.
   if not def then
     if type(vkCodes) == "table" and vkCodes[key] ~= nil then def = { vk = key }
-    else return { key = key, supported = false, reason = "not a logical key of this module" .. ((type(vkCodes) == "table") and (" and not an Enums.VirtualKeyCode name on this console") or "") } end
+    else return { key = key, supported = false, code = "unknown-key", reason = "not a logical key of this module" .. ((type(vkCodes) == "table") and (" and not an Enums.VirtualKeyCode name on this console") or "") } end
   end
   local codes = opts and opts.keyboardCodes
   local function checkPcKey(r)
     if type(codes) == "table" then
       if codes[r.pcKey] == nil then
-        return { key = key, supported = false, reason = "route names PC key '" .. tostring(r.pcKey) .. "', which is not an Enums.KeyboardCodes name on this console", route = r.source, shortcut = r.shortcut }
+        return { key = key, supported = false, code = "bad-pc-key", reason = "route names PC key '" .. tostring(r.pcKey) .. "', which is not an Enums.KeyboardCodes name on this console", route = r.source, shortcut = r.shortcut }
       end
       r.pcKeyValidated = true
     else
@@ -277,21 +499,21 @@ local function resolve(rows, vkCodes, name, opts)
     -- The fixed route is native console behaviour; a shortcut row claiming the same PC key is a collision
     -- whose precedence is unverified.
     local c = type(rows) == "table" and collisions(rows, { key = def.pcKey, shift = false, ctrl = false, alt = false }, nil) or nil
-    if c then return { key = key, supported = false, source = "fixed", pcKey = def.pcKey, reason = "shortcut collision: " .. table.concat(c, ", ") .. " also claims the plain " .. def.pcKey .. " key", collisions = c } end
+    if c then return { key = key, supported = false, code = "collision", source = "fixed", pcKey = def.pcKey, reason = "shortcut collision: " .. table.concat(c, ", ") .. " also claims the plain " .. def.pcKey .. " key", collisions = c } end
     return checkPcKey({ key = key, supported = true, backend = "keyboard", pcKey = def.pcKey, shift = false, ctrl = false, alt = false,
              verify = def.verify, source = "fixed", note = "MA is the PC Shift key itself; it does not use the shortcut table" })
   end
   if type(rows) ~= "table" or type(vkCodes) ~= "table" then
-    return { key = key, supported = false, reason = "shortcut table or VirtualKeyCode enum unavailable" }
+    return { key = key, supported = false, code = "unreadable", reason = "shortcut table or VirtualKeyCode enum unavailable" }
   end
   local vk = vkCodes[def.vk]
-  if vk == nil then return { key = key, supported = false, reason = "VirtualKeyCode " .. def.vk .. " unknown on this console" } end
+  if vk == nil then return { key = key, supported = false, code = "unknown-key", reason = "VirtualKeyCode " .. def.vk .. " unknown on this console" } end
   if def.native then
     -- Native route: the PC key must not be claimed by the shortcut table for another MA key (which
     -- one would win is unverified), and the system redirect, when readable, must still name it.
     local c = collisions(rows, { key = def.native, shift = false, ctrl = false, alt = false }, { keyCode = vk })
     if c then
-      return { key = key, supported = false, source = "native", pcKey = def.native, collisions = c,
+      return { key = key, supported = false, code = "collision", source = "native", pcKey = def.native, collisions = c,
                reason = string.format("ambiguous: %s maps the plain %s key to another target than %s; the native %s redirect cannot be relied on", table.concat(c, ", "), def.native, def.vk, def.native) }
     end
     local redirects = opts and opts.redirects
@@ -301,7 +523,7 @@ local function resolve(rows, vkCodes, name, opts)
       if redirect ~= nil then
         redirectChecked = true
         if tostring(redirect) ~= def.native then
-          return { key = key, supported = false, source = "native", pcKey = def.native,
+          return { key = key, supported = false, code = "redirect", source = "native", pcKey = def.native,
                    reason = string.format("the VirtualKey %s redirect is '%s' on this console, not '%s'", def.vk, tostring(redirect), def.native) }
         end
       end
@@ -312,7 +534,7 @@ local function resolve(rows, vkCodes, name, opts)
   end
   local executor = opts and opts.executor
   if def.needsExecutor then
-    if type(executor) ~= "number" then return { key = key, supported = false, reason = "EXEC needs opts.executor (the ExecutorIndex of a mapped executor shortcut)" } end
+    if type(executor) ~= "number" then return { key = key, supported = false, code = "bad-argument", reason = "EXEC needs opts.executor (the ExecutorIndex of a mapped executor shortcut)" } end
   end
   local best, bestParsed, bestIndex, ties
   for i, row in ipairs(rows) do
@@ -330,7 +552,7 @@ local function resolve(rows, vkCodes, name, opts)
   end
   if not best then
     local what = def.needsExecutor and ("EXEC with ExecutorIndex " .. tostring(executor)) or key
-    return { key = key, supported = false, reason = "no keyboard shortcut maps to " .. what .. " in the current user profile" }
+    return { key = key, supported = false, code = "no-row", reason = "no keyboard shortcut maps to " .. what .. " in the current user profile" }
   end
   -- Several rows with the same key text (the default profile has two "Enter" rows) are one route;
   -- different shortcuts with the same modifier count are ambiguous and are rejected, never guessed.
@@ -353,13 +575,13 @@ local function resolve(rows, vkCodes, name, opts)
       end
     end
     if not preferred then
-      return { key = key, supported = false, reason = "ambiguous: several shortcuts with the same modifier count map to " .. key .. " (" .. table.concat(ties, ", ") .. "); edit the profile or name one with opts.prefer", candidates = ties }
+      return { key = key, supported = false, code = "ambiguous", reason = "ambiguous: several shortcuts with the same modifier count map to " .. key .. " (" .. table.concat(ties, ", ") .. "); edit the profile or name one with opts.prefer", candidates = ties }
     end
   end
   -- The chosen tuple must not also be claimed for another target anywhere in the table.
   local c = collisions(rows, bestParsed, { keyCode = vk, executorIndex = def.needsExecutor and executor or nil, specialExec = best.specialExec })
   if c then
-    return { key = key, supported = false, reason = string.format("shortcut collision: %s is mapped to %s by row %d but also to another target by %s; the console's precedence is unverified, so the route is refused", best.shortcut, key, bestIndex, table.concat(c, ", ")), collisions = c, shortcut = best.shortcut }
+    return { key = key, supported = false, code = "collision", reason = string.format("shortcut collision: %s is mapped to %s by row %d but also to another target by %s; the console's precedence is unverified, so the route is refused", best.shortcut, key, bestIndex, table.concat(c, ", ")), collisions = c, shortcut = best.shortcut }
   end
   return checkPcKey({ key = key, supported = true, backend = "keyboard", pcKey = bestParsed.key, shift = bestParsed.shift, ctrl = bestParsed.ctrl,
            alt = bestParsed.alt, shortcut = best.shortcut, rowIndex = bestIndex, executor = def.needsExecutor and executor or nil, source = "shortcut-table",
@@ -370,10 +592,19 @@ end
 -- deliberately not part of it (display_index does not route input on 2.5.1, KB-01), nor is the logical
 -- name, so MA and a raw LeftShift, or the same key asked for on two displays, are the same tuple.
 local function tupleKey(t)
+  -- A Quickey tuple (KB-11) is identified by its VirtualKeyCode name: the same code through two owned
+  -- objects would be the same console key, so it is one tuple.
+  -- Identity is the validated code VALUE when known (aliases such as OOPS/UNDO are one console key), the
+  -- name only for tuples that never went through resolution (backend test controls).
+  if t.quickkey then return "quickkey:" .. (t.quickkeyCode ~= nil and ("#" .. tostring(t.quickkeyCode)) or tostring(t.quickkey)) end
+  -- A text route (KB-14) owns no console key; its identity is the logical key it inserts text for.
+  if t.text ~= nil then return "text:" .. tostring(t.textKey) end
   return string.format("%s|s%dc%da%dn%d", t.pcKey, t.shift and 1 or 0, t.ctrl and 1 or 0, t.alt and 1 or 0, t.numlock and 1 or 0)
 end
 
 local function copyTuple(t)
+  if t.quickkey then return { quickkey = t.quickkey, quickkeyCode = t.quickkeyCode, display = t.display } end
+  if t.text ~= nil then return { text = t.text, textKey = t.textKey, display = t.display } end
   return { pcKey = t.pcKey, shift = t.shift and true or false, ctrl = t.ctrl and true or false,
            alt = t.alt and true or false, numlock = t.numlock and true or false, display = t.display }
 end
@@ -386,6 +617,215 @@ local function shallowCopy(t)
 end
 
 local function count(t) local n = 0; for _ in pairs(t) do n = n + 1 end; return n end
+
+local function entryField(policy, key, field)
+  local e = policy and policy.keys and policy.keys[key]
+  return e and e[field] or nil
+end
+
+-- Quickey bank (KB-12, 0.7.0) ----------------------------------------------------
+--
+-- One owned Quickey per command-area hardkey code, created in an operator-selected pool range, plus a
+-- reserved executor range for holds: KB-10 established that a Quickey addressed directly is always a
+-- complete tap, and that press/release needs the Quickey assigned to an executor (Press/Unpress
+-- Executor). Provisioning, verification, teardown and adoption live here so that no surface writes its
+-- own allocator. Rules:
+--   * nothing is created, changed or deleted unless provisionBank()/teardownBank() are called with
+--     spec.authorized == true, the consumer's explicit operator decision (the bridge takes it from the
+--     plugin argument, never from a client request);
+--   * ownership is proven by the marker the module wrote into the Quickey's Note (owner, bank id, code,
+--     executor range) AND the matching Code/Name, re-read before every mutation and before every
+--     dispatch; a label alone proves nothing, and an object that fails the check is refused, never
+--     repaired or overwritten;
+--   * preflight checks the complete reservation before the first object is created, and every target is
+--     re-read right before it is mutated; preflight is not an atomic reservation against other plugins;
+--   * a bank marked by another owner is refused (no shared arbitration in this version); a bank of the
+--     same owner is reused only after identity, codes and configuration verified;
+--   * codes are discovered from Enums.VirtualKeyCode at provisioning time (not a fixed count), aliases
+--     are deduplicated and exclusions reported; each code carries its KB-10 qualification, and a code
+--     without evidence is provisioned as DISCOVERED (qualified = false): a backend must not advertise it.
+local BANK_MARKER         = "gma3_mcp_hardkeys-bank"
+local BANK_MARKER_VERSION = 1
+local BANK_NAME_PREFIX    = "MCP "        -- Quickey Name "MCP NUM5"; the Note carries the marker
+local BANK_PLACEHOLDER    = "RESERVED"    -- the code-less Quickey assigned to every reserved executor (its marker says code=RESERVED)
+local BANK_MAX_CODES      = 512           -- sanity bound on the discovered enum
+
+-- Codes that are not command-area hardkeys (KB-10 "Exclusions to decide at provisioning time").
+local BANK_EXCLUDED = {
+  [""] = "enum placeholder (value 0)", UNKNOWN = "enum placeholder (value 0)",
+  XKEYS = "X-key bank key, not a command-area hardkey", EXEC = "executor key, not a command-area hardkey",
+  FADER = "fader key, not a command-area hardkey",
+}
+local BANK_EXCLUDED_PATTERNS = {
+  { "^X%d+$", "X-key" }, { "^ENCODER_", "encoder key" }, { "^ONPC_SCREEN%d+$", "onPC screen selector" },
+  { "^DEF_", "default-executor button function" },
+}
+-- Executor button functions (VirtualKeyCode 101-114 on 2.5.1): they act on an executor, not on the command area.
+local BANK_EXECUTOR_FUNCTIONS = { FLASH = true, BLACK = true, KILL = true, RATE1 = true, TEMP = true, TOGGLE = true, TOP = true, LOAD = true,
+                                  LOWLIGHT = true, GOSTEP = true, SWAP = true, HALF_SPEED = true, DOUBLE_SPEED = true, RECORD = true }
+-- Alias -> canonical name for enum entries that share a value (KB-10: UNDO = 86 = OOPS). Unknown
+-- aliases are deduplicated by value with the alphabetically first name and reported.
+local BANK_ALIASES = { UNDO = "OOPS" }
+
+-- KB-10 evidence per code (onPC 2.5.1.0, macOS, executor path for holds). Everything else is
+-- discovered only. `tap` is a direct Press Quickey or an executor press/release pair; `hold` is an
+-- executor Press kept down until Unpress; `chord` is a hold next to another held bank key.
+local BANK_QUALIFIED = {
+  NUM1    = { tap = true, hold = true,  chord = false },
+  NUM5    = { tap = true, hold = true,  chord = true, note = "a direct Unpress Quickey re-activates it: stuck-key recovery is NOT qualified for NUM5" },
+  THRU    = { tap = true, hold = true,  chord = false },
+  FIXTURE = { tap = true, hold = true,  chord = false },
+  PLEASE  = { tap = true, hold = true,  chord = false, note = "executes the command line; immediately after digits it is accepted in the same chunk outside a text pop-up" },
+  CLEAR   = { tap = true, hold = true,  chord = false },
+  STORE   = { tap = true, hold = true,  chord = true, note = "a 2 s executor hold did not open the Store Settings pop-up" },
+  MA1     = { tap = false, hold = true, chord = true, note = "a direct tap holds nothing; qualified as an executor hold (MA1+STORE gave Record); the only code whose stuck-key recovery (direct Unpress Quickey) is qualified" },
+  OOPS    = { tap = true, hold = false, chord = false, note = "Undo on an empty command line: it can revert show data, never use it as a clear" },
+}
+-- Discovered codes with evidence that they do NOT behave as command-area keys through a Quickey.
+local BANK_UNQUALIFIED_NOTES = { ESC = "as a Quickey, ESC never touched the command line (direct and executor path)" }
+
+-- Marker text written into the Note: "gma3_mcp_hardkeys-bank v1 owner=<owner> bank=<id> code=<NAME> exec=<page>.<first>-<last>".
+-- Owner and id are percent-free tokens (no whitespace); the parser is strict.
+local function bankMarkerText(owner, id, code, ex)
+  return string.format("%s v%d owner=%s bank=%s code=%s exec=%d.%d-%d", BANK_MARKER, BANK_MARKER_VERSION, owner, id, code, ex.page, ex.first, ex.first + ex.count - 1)
+end
+local function parseBankMarker(note)
+  if type(note) ~= "string" then return nil end
+  local v, rest = note:match("^" .. BANK_MARKER:gsub("%-", "%%-") .. " v(%d+) (.*)$")
+  if not v then return nil end
+  local m = { version = tonumber(v) }
+  for k, val in rest:gmatch("(%a+)=(%S+)") do m[k] = val end
+  if not (m.owner and m.bank and m.code and m.exec) then return nil end
+  local page, first, last = m.exec:match("^(%d+)%.(%d+)%-(%d+)$")
+  if not page then return nil end
+  m.execPage, m.execFirst, m.execLast = tonumber(page), tonumber(first), tonumber(last)
+  return m
+end
+-- The bank id is deterministic from owner and ranges, so the same spec finds its own bank after a
+-- restart without any stored state; a different spec on the same slots is a mismatch, never a merge.
+local function bankId(owner, spec)
+  return string.format("%s@q%d.e%d.%d-%d", owner, spec.quickeys.first, spec.executors.page, spec.executors.first, spec.executors.first + spec.executors.count - 1)
+end
+local function bankIsToken(s) return type(s) == "string" and s ~= "" and not s:find("%s") and not s:find("=") end
+
+-- Validates a provisioning spec and returns a normalised copy, or nil, { code, message }.
+-- spec = { authorized = true, quickeys = { first = n }, executors = { page = p, first = n, count = k },
+--          codes = "hardkeys" | "qualified" | { "NUM1", ... }, label = <string> }
+local function validateBankSpec(spec, config)
+  if type(spec) ~= "table" then return nil, { code = "bank-invalid", message = "provisioning spec must be a table { authorized, quickeys, executors, codes, label }" } end
+  for k in pairs(spec) do
+    if k ~= "authorized" and k ~= "quickeys" and k ~= "executors" and k ~= "codes" and k ~= "label" then
+      return nil, { code = "bank-invalid", message = "unknown provisioning field '" .. tostring(k) .. "' (fields: authorized, quickeys, executors, codes, label)" }
+    end
+  end
+  local function posInt(v, what, max)
+    if type(v) ~= "number" or v < 1 or v ~= math.floor(v) or (max and v > max) then
+      return nil, { code = "bank-invalid", message = what .. " must be a positive integer" .. (max and (" up to " .. max) or "") .. " (got " .. tostring(v) .. ")" }
+    end
+    return v
+  end
+  if type(spec.quickeys) ~= "table" then return nil, { code = "bank-invalid", message = "quickeys = { first = <pool index> } is required: the operator selects the Quickey range" } end
+  local qfirst, err = posInt(spec.quickeys.first, "quickeys.first", 9999); if not qfirst then return nil, err end
+  for k in pairs(spec.quickeys) do if k ~= "first" then return nil, { code = "bank-invalid", message = "unknown quickeys field '" .. tostring(k) .. "' (fields: first)" } end end
+  if type(spec.executors) ~= "table" then return nil, { code = "bank-invalid", message = "executors = { page, first, count } is required: holds need the Quickey on an executor (KB-10), so the operator selects the executor range" } end
+  for k in pairs(spec.executors) do if k ~= "page" and k ~= "first" and k ~= "count" then return nil, { code = "bank-invalid", message = "unknown executors field '" .. tostring(k) .. "' (fields: page, first, count)" } end end
+  local page; page, err = posInt(spec.executors.page, "executors.page", 9999); if not page then return nil, err end
+  local efirst; efirst, err = posInt(spec.executors.first, "executors.first", 9999); if not efirst then return nil, err end
+  local count = spec.executors.count
+  if count == nil then count = config.maxHolds end
+  count, err = posInt(count, "executors.count", 64); if not count then return nil, err end
+  if count < config.maxHolds then
+    return nil, { code = "bank-invalid", message = string.format("executors.count %d is below config.maxHolds %d: every concurrently held key needs its own executor", count, config.maxHolds) }
+  end
+  local codes = spec.codes
+  if codes == nil then codes = "hardkeys" end
+  if type(codes) == "string" then
+    if codes ~= "hardkeys" and codes ~= "qualified" then return nil, { code = "bank-invalid", message = "codes must be \"hardkeys\" (every command-area code, discovered), \"qualified\" (KB-10 evidence only) or a list of VirtualKeyCode names" } end
+  elseif type(codes) == "table" then
+    if #codes == 0 then return nil, { code = "bank-invalid", message = "codes list is empty" } end
+    local seen, list = {}, {}
+    for i, c in ipairs(codes) do
+      if type(c) ~= "string" or c == "" then return nil, { code = "bank-invalid", message = "codes[" .. i .. "] must be a VirtualKeyCode name" } end
+      local u = c:upper()
+      if not seen[u] then seen[u] = true; list[#list + 1] = u end
+    end
+    codes = list
+  else
+    return nil, { code = "bank-invalid", message = "codes must be a string or a list" }
+  end
+  if spec.label ~= nil and type(spec.label) ~= "string" then return nil, { code = "bank-invalid", message = "label must be a string" } end
+  return { authorized = spec.authorized == true, quickeys = { first = qfirst }, executors = { page = page, first = efirst, count = count }, codes = codes, label = spec.label }
+end
+
+-- Discovers the code set from the VirtualKeyCode enum: one entry per distinct value, aliases folded
+-- onto their canonical name, exclusions reported with their reason, ordered by value (the pool slot
+-- is first + rank, so the layout is stable for a given console enum). selection = "hardkeys" |
+-- "qualified" | list of names.
+local function discoverBankCodes(vk, selection)
+  if type(vk) ~= "table" then return nil, "Enums.VirtualKeyCode is not a table" end
+  local byValue, names = {}, {}
+  for name, value in pairs(vk) do
+    if type(name) == "string" and type(value) == "number" then
+      names[#names + 1] = name
+      byValue[value] = byValue[value] or {}
+      table.insert(byValue[value], name)
+    end
+  end
+  if #names == 0 then return nil, "Enums.VirtualKeyCode has no entries" end
+  if #names > BANK_MAX_CODES then return nil, "Enums.VirtualKeyCode has " .. #names .. " entries, more than the bound " .. BANK_MAX_CODES end
+  local values = {}
+  for v in pairs(byValue) do values[#values + 1] = v end
+  table.sort(values)
+  local wanted
+  if type(selection) == "table" then wanted = {}; for _, n in ipairs(selection) do wanted[n] = true end end
+  local codes, exclusions, aliases, unresolvedAliases = {}, {}, {}, {}
+  for _, value in ipairs(values) do
+    local group = byValue[value]
+    table.sort(group)
+    local canonical
+    local nonAlias = {}
+    for _, n in ipairs(group) do if not BANK_ALIASES[n] and n ~= "" then nonAlias[#nonAlias + 1] = n end end
+    if value == 0 then canonical = nonAlias[1] or group[1]
+    elseif #nonAlias == 1 then canonical = nonAlias[1]
+    elseif #nonAlias == 0 then canonical = group[1]
+    else
+      canonical = nonAlias[1]
+      if value ~= 0 then unresolvedAliases[#unresolvedAliases + 1] = { value = value, names = group, chosen = canonical } end
+    end
+    if value ~= 0 then
+      for _, n in ipairs(group) do if n ~= canonical then aliases[#aliases + 1] = { alias = n, canonical = canonical, value = value } end end
+    end
+    local reason
+    if value == 0 then reason = "enum placeholder (value 0)"
+    elseif BANK_EXCLUDED[canonical] then reason = BANK_EXCLUDED[canonical]
+    elseif BANK_EXECUTOR_FUNCTIONS[canonical] then reason = "executor button function, not a command-area hardkey"
+    else
+      for _, p in ipairs(BANK_EXCLUDED_PATTERNS) do if canonical:match(p[1]) then reason = p[2] .. ", not a command-area hardkey"; break end end
+    end
+    local q = BANK_QUALIFIED[canonical]
+    if reason then
+      if wanted and wanted[canonical] then return nil, "code " .. canonical .. " is excluded from banks: " .. reason end
+      exclusions[#exclusions + 1] = { name = canonical, value = value, reason = reason }
+    elseif selection == "qualified" and not q then
+      exclusions[#exclusions + 1] = { name = canonical, value = value, reason = "no KB-10 evidence (codes = \"qualified\")" }
+    elseif wanted and not wanted[canonical] then
+      -- not selected: silently absent (an explicit list is the operator's choice)
+    else
+      codes[#codes + 1] = { name = canonical, value = value, qualified = q and shallowCopy(q) or false, note = (q and q.note) or BANK_UNQUALIFIED_NOTES[canonical] }
+    end
+  end
+  if wanted then
+    for n in pairs(wanted) do
+      local found = false
+      for _, c in ipairs(codes) do if c.name == n then found = true; break end end
+      if not found then
+        if BANK_ALIASES[n] and vk[n] ~= nil then return nil, "code " .. n .. " is an alias of " .. BANK_ALIASES[n] .. "; name the canonical code" end
+        return nil, "code " .. n .. " is not an Enums.VirtualKeyCode name on this console"
+      end
+    end
+  end
+  return { codes = codes, exclusions = exclusions, aliases = aliases, unresolvedAliases = unresolvedAliases, enumEntries = #names, distinctValues = #values }
+end
 
 -- Console dependency builder -------------------------------------------------
 
@@ -400,6 +840,11 @@ local function consoleDeps(env)
       local v = env.CurrentProfile().KeyboardShortCuts:Get("KeyboardShortcutsActive")
       if v == "true" then return true elseif v == "false" then return false end
       return v
+    end,
+    -- KB-14: the one mode write the module makes (the KB-04 probe verified it takes effect and reads
+    -- back). The instance reads the state back after every write; a return here proves nothing.
+    setShortcutsActive = function(active)
+      env.CurrentProfile().KeyboardShortCuts:Set("KeyboardShortcutsActive", active and true or false)
     end,
     shortcutRows = function()
       local sc = env.CurrentProfile().KeyboardShortCuts
@@ -446,6 +891,82 @@ local function consoleDeps(env)
       end
       return out
     end,
+    -- Quickey bank (KB-12). Objects are addressed in command syntax ("Quickey N", "Page P.N") through
+    -- ObjectList(), which resolves in the current data pool; creation and deletion go through Cmd() with
+    -- /NoConfirmation, and every write is verified by the module through a readback, never through the
+    -- command's return text. The show identity is the show name plus the data pool, so a LoadShow or a
+    -- pool switch invalidates cached reads.
+    showIdentity = function()
+      -- The show FILE name (ShowData().name is the literal "ShowData" on 2.5.1) plus the data pool name.
+      local okF, file = pcall(function() return env.Root().MANetSocket:Get("ShowFile") end)
+      if not okF or file == nil or file == "" then error("show file name unreadable" .. (okF and "" or (": " .. tostring(file))), 0) end
+      local dp = env.DataPool()
+      return tostring(file) .. "|" .. tostring(dp and dp.name)
+    end,
+    quickeys = {
+      read = function(index)
+        local h = env.ObjectList(string.format("Quickey %d", index))[1]
+        if h == nil then return nil end
+        return { name = tostring(h.name), code = tostring(h:Get("Code")), note = tostring(h:Get("Note")), lock = h:Get("Lock"), class = tostring(h:GetClass()) }
+      end,
+      create = function(index) env.Cmd(string.format("Store Quickey %d /NoConfirmation", index)); return true end,
+      set = function(index, props)
+        local h = env.ObjectList(string.format("Quickey %d", index))[1]
+        if h == nil then return false, "Quickey " .. index .. " does not exist" end
+        for k, v in pairs(props) do h:Set(k, v) end
+        return true
+      end,
+      delete = function(index) env.Cmd(string.format("Delete Quickey %d /NoConfirmation", index)); return true end,
+    },
+    executors = {
+      read = function(page, index)
+        local h = env.ObjectList(string.format("Page %d.%d", page, index))[1]
+        if h == nil then
+          -- An EMPTY executor has no object under the page on 2.5.1 (ObjectList("Page 1.190") is nil for
+          -- the empty executor 190, like GetExecutor()). The slot exists when the page does and the
+          -- number is an executor number; it is reported empty, never missing.
+          local pg = env.ObjectList(string.format("Page %d", page))[1]
+          if pg == nil then return { exists = false, reason = "Page " .. page .. " does not exist" } end
+          if index < 1 or index > 999 then return { exists = false, reason = "executor numbers are 1-999" } end
+          return { exists = true, class = "Executor", empty = true }
+        end
+        local cls = tostring(h:GetClass())
+        local obj = h:Get("Object")
+        local o = nil
+        if type(obj) == "table" or type(obj) == "userdata" then
+          local okN, n = pcall(function() return tostring(obj.name) end)
+          local okC, c = pcall(function() return tostring(obj:GetClass()) end)
+          o = { name = okN and n or nil, class = okC and c or nil }
+          if c == "Quickey" then
+            -- Identity of an assigned Quickey: its pool index, marker and code (the name proves nothing).
+            local okI, i = pcall(function() return tonumber(obj.index) end)
+            local okNo, note = pcall(function() return tostring(obj:Get("Note")) end)
+            local okCo, code = pcall(function() return tostring(obj:Get("Code")) end)
+            o.index, o.note, o.code = okI and i or nil, okNo and note or nil, okCo and code or nil
+          end
+        end
+        return { exists = true, class = cls, empty = o == nil, object = o }
+      end,
+      -- Reserves/uses an executor: the paged form of the KB-10 assignment (confirmed live, KB-12 record).
+      assign = function(page, index, quickeyIndex) env.Cmd(string.format("Assign Quickey %d At Page %d.%d", quickeyIndex, page, index)); return true end,
+      -- Clears an executor's assignment ("Delete Page P.N" is the paged form of the "Delete Executor N"
+      -- the KB-10 probe used); the module only calls it for an executor it verified holds a bank Quickey.
+      clear = function(page, index) env.Cmd(string.format("Delete Page %d.%d /NoConfirmation", page, index)); return true end,
+      -- Executor key-down / key-up (KB-13): the paged form of the KB-10 "Press Executor E" (confirmed
+      -- live on 2.5.1: "Press Page 1.180" held MA1 until "Unpress Page 1.180"). The console's feedback
+      -- is the parser's verdict: "OK" when the command was dispatched, "Object not found" for an empty
+      -- executor; anything but OK is reported as not accepted (nothing changed), a raise as unknown.
+      press = function(page, index)
+        local fb = env.Cmd(string.format("Press Page %d.%d", page, index))
+        if type(fb) == "string" and fb:sub(1, 2) == "OK" then return true, fb end
+        return false, tostring(fb)
+      end,
+      unpress = function(page, index)
+        local fb = env.Cmd(string.format("Unpress Page %d.%d", page, index))
+        if type(fb) == "string" and fb:sub(1, 2) == "OK" then return true, fb end
+        return false, tostring(fb)
+      end,
+    },
   }
 end
 
@@ -468,6 +989,9 @@ local function fakeBackend(opts)
   opts = opts or {}
   return setmetatable({
     name = "fake", dispatches = true, description = BACKENDS.fake.description,
+    -- What the fake claims it can dispatch (KB-11). Tests narrow it (opts.capabilities) to stage a
+    -- backend without Quickey dispatch; the default mirrors what the fake really simulates.
+    capabilities = opts.capabilities or shallowCopy(BACKENDS.fake.capabilities),
     events = {}, eventLog = tonumber(opts.eventLog) or DEFAULT_CONFIG.eventLog,
     down = {},                 -- simulated aggregate console key state
     confirmMode = true,        -- what release()/press() report as "confirmed": true | false | nil
@@ -485,7 +1009,7 @@ function FakeBackend:_raise(op)
 end
 
 function FakeBackend:_log(kind, tuple, extra)
-  local e = { kind = kind, pcKey = tuple.pcKey, shift = tuple.shift, ctrl = tuple.ctrl, alt = tuple.alt, numlock = tuple.numlock, display = tuple.display }
+  local e = { kind = kind, pcKey = tuple.pcKey, quickkey = tuple.quickkey, quickkeyCode = tuple.quickkeyCode, shift = tuple.shift, ctrl = tuple.ctrl, alt = tuple.alt, numlock = tuple.numlock, display = tuple.display }
   if extra then for k, v in pairs(extra) do e[k] = v end end
   self.events[#self.events + 1] = e
   while #self.events > self.eventLog do table.remove(self.events, 1) end
@@ -521,6 +1045,9 @@ end
 function FakeBackend:press(tuple)
   self.counters.press = self.counters.press + 1
   self:_raise("press")
+  if tuple.quickkey and not (type(self.capabilities) == "table" and self.capabilities.quickkey) then
+    self:_log("press", tuple, { failed = "no Quickey dispatch" }); return false, nil, "the fake backend was created without Quickey dispatch"
+  end
   local err = self:_failure("press", tuple)
   if err then self:_log("press", tuple, { failed = err }); return false, nil, err end
   self.down[tupleKey(tuple)] = true
@@ -608,6 +1135,8 @@ local function keyboardBackend(deps, opts)
   opts = opts or {}
   return setmetatable({
     name = "keyboard", dispatches = true, description = BACKENDS.keyboard.description, limitations = KEYBOARD_LIMITATIONS,
+    -- modeChange (KB-14) needs the write dep; without it the mode is read but never changed.
+    capabilities = (function() local c = shallowCopy(BACKENDS.keyboard.capabilities); c.modeChange = type(deps.setShortcutsActive) == "function"; return c end)(),
     deps = deps, defaultDisplay = tonumber(opts.defaultDisplay) or 1,
     counters = { press = 0, release = 0, char = 0, refused = 0, raised = 0, observe = 0 },
     lastEvent = nil,
@@ -649,6 +1178,7 @@ end
 
 -- Everything that must hold before the first event of a press or combo goes out. Nothing is sent.
 function KeyboardBackend:preflight(tuple, route)
+  if tuple.quickkey then return false, "the Keyboard() backend has no Quickey dispatch (KB-13)" end
   if type(self.deps.Keyboard) ~= "function" then return false, "Keyboard() is not available in this Lua environment" end
   local ok, reason = self:supportsKey(tuple.pcKey)
   if not ok then return false, reason end
@@ -667,6 +1197,10 @@ end
 
 function KeyboardBackend:_send(kind, tuple)
   self.counters[kind] = self.counters[kind] + 1
+  if tuple.quickkey then
+    self.counters.refused = self.counters.refused + 1
+    return false, nil, "the Keyboard() backend has no Quickey dispatch (KB-13); a Quickey tuple is never turned into a PC key"
+  end
   if type(self.deps.Keyboard) ~= "function" then
     self.counters.refused = self.counters.refused + 1
     return false, nil, "Keyboard() is not available in this Lua environment"
@@ -760,13 +1294,1245 @@ function Instance:attachBackend(adapter)
   return { attached = true, backend = adapter.name, enabled = self._inputEnabled and true or false }
 end
 
--- Operator decision: attach a dispatching adapter and admit presses.
-function Instance:enableInput(adapter)
+-- Operator decision: attach a dispatching adapter and admit presses. opts.routing (KB-13) replaces the
+-- routing policy in the same step, validated against the NEW adapter: a consumer switching to a backend
+-- that serves other methods (the Quickey backend has no PC keys) could otherwise neither change the
+-- policy first (refused against the old adapter) nor attach first (refused against the old policy).
+function Instance:enableInput(adapter, opts)
   checkReady(self, "enableInput")
+  if type(adapter) ~= "table" or type(adapter.press) ~= "function" or type(adapter.release) ~= "function" or type(adapter.name) ~= "string" then
+    return fail("bad-adapter", "enableInput needs a backend adapter table with name, press() and release()")
+  end
+  local policy = self._routing
+  if type(opts) == "table" and opts.routing ~= nil then
+    local p, perr = validateRoutingPolicy(opts.routing, self._config.maxTextChars)
+    if not p then return nil, perr end
+    policy = p
+  end
+  -- KB-11: every method the routing policy names must be dispatchable by this adapter. A policy the
+  -- backend cannot serve is refused here rather than accepted as inert configuration (nothing attaches).
+  local okP, problems = self:_policyAvailability(policy, adapter)
+  if not okP then return nil, self:_policyUnavailable(problems, adapter) end
   local r, err = self:attachBackend(adapter)
   if not r then return nil, err end
+  self._routing = policy
   self._inputEnabled = true
-  return { enabled = true, backend = adapter.name }
+  return { enabled = true, backend = adapter.name, routing = { default = self._routing.default, overrides = count(self._routing.keys) } }
+end
+
+-- Routing policy (KB-11) ----------------------------------------------------------
+
+-- Replaces the routing policy: one default method and per-key overrides (see validateRoutingPolicy).
+-- Validation is complete before anything changes; a refused policy leaves the previous one in place.
+-- While a backend is attached, every method the policy names must be dispatchable by it (an unknown
+-- or unavailable method fails validation; it never selects another backend). Live holds keep the route
+-- they were pressed with: this call never re-routes, releases or re-presses anything.
+function Instance:configureRouting(policy)
+  checkReady(self, "configureRouting")
+  local p, err = validateRoutingPolicy(policy, self._config.maxTextChars)
+  if not p then return nil, err end
+  if self._adapter then
+    local ok, problems = self:_policyAvailability(p, self._adapter)
+    if not ok then return nil, self:_policyUnavailable(problems, self._adapter) end
+  end
+  self._routing = p
+  return self:routingReport()
+end
+
+-- Read-only summary of the policy, the methods the attached backend can serve and the per-key overrides.
+function Instance:routingReport()
+  local p = self._routing
+  local methods = {}
+  for _, m in ipairs(METHOD_LIST) do
+    if self._adapter then
+      local ok, missing = self:_methodAvailability(m, self._adapter)
+      methods[m] = { available = ok, missing = (not ok) and missing or nil }
+    else
+      methods[m] = { available = false, missing = { "no backend attached" } }
+    end
+  end
+  local keys = {}
+  for k, e in pairs(p.keys) do
+    keys[k] = { method = e.method or p.default, methodSource = e.method and "key" or (p.defaultExplicit and "default" or "module-default"),
+                quickkey = e.quickkey, prefer = e.prefer, text = e.text, textChars = e.textChars }
+  end
+  return { default = p.default, defaultSource = p.defaultExplicit and "consumer" or "module", keys = keys, overrideCount = count(keys),
+           methods = methods, methodList = METHOD_LIST, backend = self._backend, capabilities = adapterCapabilities(self._adapter),
+           note = "the method is decided per press before dispatch and kept for the whole press/release cycle; text routes and temporary shortcut-mode changes (KB-14) need capabilities.char / capabilities.modeChange on the backend; no method ever falls back to another" }
+end
+
+-- Static availability of one method on an adapter (dynamic requirements such as the shortcut mode are
+-- reported per key by describeRoute()).
+function Instance:_methodAvailability(method, adapter)
+  local caps = adapterCapabilities(adapter)
+  local missing = {}
+  if not caps then
+    missing[#missing + 1] = "no backend attached"
+  elseif method == "quickkey" then
+    if not caps.quickkey then missing[#missing + 1] = "backend '" .. tostring(adapter.name) .. "' has no Quickey dispatch (capabilities.quickkey; the owned-Quickey backend is KB-13)" end
+  elseif method == "shortcut" or method == "shortcutOrType" then
+    if not caps.keyboard then missing[#missing + 1] = "backend '" .. tostring(adapter.name) .. "' has no PC-key dispatch (capabilities.keyboard)" end
+    -- The text side of shortcutOrType and the mode change of shortcut are per-route requirements
+    -- (describeRoute names them when a key selects them); the PC-key side is the static one.
+  elseif method == "type" then
+    if not caps.char then missing[#missing + 1] = NEED_CHAR end
+    if not (caps.modeChange and type(self._deps.setShortcutsActive) == "function") then missing[#missing + 1] = NEED_MODE end
+  else
+    missing[#missing + 1] = "unknown method '" .. tostring(method) .. "'"
+  end
+  return #missing == 0, missing
+end
+
+function Instance:_policyAvailability(policy, adapter)
+  local methods = { [policy.default] = true }
+  for _, e in pairs(policy.keys) do if e.method then methods[e.method] = true end end
+  local problems = {}
+  for _, m in ipairs(METHOD_LIST) do
+    if methods[m] then
+      local ok, missing = self:_methodAvailability(m, adapter)
+      if not ok then problems[#problems + 1] = { method = m, missing = missing } end
+    end
+  end
+  return #problems == 0, problems
+end
+
+function Instance:_policyUnavailable(problems, adapter)
+  local parts = {}
+  for _, pr in ipairs(problems) do parts[#parts + 1] = pr.method .. ": " .. table.concat(pr.missing, "; ") end
+  return { code = "policy-unavailable", message = "the routing policy names dispatch methods backend '" .. tostring(adapter and adapter.name) .. "' cannot serve (" .. table.concat(parts, " / ") .. "); unavailable methods are refused, never replaced by another backend", problems = problems }
+end
+
+-- Resolves a logical key through the routing policy: the configured method (per-key override, consumer
+-- default or the module default "shortcut"), the effective route it selects now, the backend
+-- capabilities it needs and every unavailable requirement. Nothing is dispatched; reads are the
+-- describeKey() reads plus the VirtualKeyCode enum for Quickey codes. `routing` is a stored hold's
+-- snapshot: rechecks use the decision that was pressed with, never the current policy.
+function Instance:describeRoute(name, opts)
+  checkLive(self, "describeRoute")
+  local r = self:_route(name, opts)
+  -- KB-15: the backend (or the part of a mixed backend) that would press this route, for startup/status reports.
+  if self._adapter and (r.tuple or r.effective == "text") then
+    local probe = r.tuple or { pcKey = "" }
+    if type(self._adapter.recordBackend) == "function" then
+      local ok, b = pcall(self._adapter.recordBackend, self._adapter, probe)
+      r.dispatchBackend = (ok and type(b) == "string") and b or self._adapter.name
+    else
+      r.dispatchBackend = self._adapter.name
+    end
+  end
+  return r
+end
+
+function Instance:_route(name, opts, routing)
+  opts = opts or {}
+  local key = type(name) == "string" and name:upper() or tostring(name)
+  local p = self._routing
+  local entry = routing or p.keys[key] or {}
+  local method = entry.method or p.default
+  local methodSource = routing and (routing.methodSource or "hold") or (entry.method and "key" or (p.defaultExplicit and "default" or "module-default"))
+  local prefer = opts.prefer or entry.prefer
+  local caps = adapterCapabilities(self._adapter)
+  local r = { key = key, method = method, methodSource = methodSource, prefer = prefer, executor = opts.executor,
+              quickkey = entry.quickkey, text = entry.text, textChars = entry.textChars, unavailable = {}, supported = false, dispatchable = false,
+              capabilities = caps, backend = self._adapter and self._adapter.name or nil }
+  local function unavailable(why)
+    for _, w in ipairs(r.unavailable) do if w == why then return end end
+    r.unavailable[#r.unavailable + 1] = why
+  end
+  -- A mode change (KB-14) needs both the backend's claim and the write dep; without the dep the mode
+  -- is read but never written (the pre-0.9.0 behaviour for every route that would need it).
+  local canChangeMode = caps and caps.modeChange and type(self._deps.setShortcutsActive) == "function" or false
+  local function refuse(code, why) r.supported, r.code, r.reason = false, code, why; return r end
+  local function backendNeeds(cap, what)
+    if not caps then unavailable("no backend attached")
+    elseif not caps[cap] then unavailable("backend '" .. tostring(self._adapter.name) .. "' has no " .. what) end
+  end
+  local function keyboardTuple(d)
+    r.tuple = { pcKey = d.pcKey, shift = d.shift and true or false, ctrl = d.ctrl and true or false, alt = d.alt and true or false }
+    r.resolution = d
+    backendNeeds("keyboard", "PC-key dispatch (capabilities.keyboard)")
+  end
+  if method == "quickkey" then
+    local code = entry.quickkey or key
+    r.quickkey, r.effective = code, "quickkey"
+    if type(self._deps.virtualKeyCodes) ~= "function" then return refuse("unreadable", "Enums.VirtualKeyCode cannot be read (deps.virtualKeyCodes missing); the Quickey code " .. code .. " cannot be validated") end
+    local okV, vk = pcall(self._deps.virtualKeyCodes)
+    if not okV or type(vk) ~= "table" then return refuse("unreadable", "Enums.VirtualKeyCode read failed (" .. tostring(okV and "not a table" or vk) .. "); the Quickey code " .. code .. " cannot be validated") end
+    if vk[code] == nil then return refuse("unknown-key", "Quickey code " .. code .. " is not an Enums.VirtualKeyCode name on this console (nothing is guessed from the key name " .. key .. ")") end
+    r.codeValue, r.codeValidated, r.supported = vk[code], true, true
+    if not caps then unavailable("no backend attached")
+    elseif not caps.quickkey then unavailable("backend '" .. tostring(self._adapter.name) .. "' has no Quickey dispatch (capabilities.quickkey; use the owned-Quickey backend, quickeyBackend(), KB-13)")
+    else
+      r.quickkeyCapabilities, r.quickkeyCapabilitySource = caps.quickkey, "backend"
+      -- KB-13: an adapter may qualify codes individually (the owned-Quickey backend: KB-10 evidence per
+      -- code) and name requirements a route is missing right now (no bank, code not in the bank).
+      if type(self._adapter.quickkeyCapabilities) == "function" then
+        local okC, pc = pcall(self._adapter.quickkeyCapabilities, self._adapter, code)
+        if okC and type(pc) == "table" then r.quickkeyCapabilities, r.quickkeyCapabilitySource = pc, "code" end
+      end
+      if type(self._adapter.unavailable) == "function" then
+        local okU, list = pcall(self._adapter.unavailable, self._adapter, code)
+        if okU and type(list) == "table" then for _, why in ipairs(list) do unavailable(tostring(why)) end
+        elseif not okU then unavailable("backend availability check raised: " .. tostring(list)) end
+      end
+    end
+    r.tuple = { quickkey = code, quickkeyCode = vk[code] }
+  elseif method == "shortcut" then
+    local d = self:describeKey(key, { executor = opts.executor, prefer = prefer })
+    r.resolution = d
+    if not d.supported then return refuse(d.code or "unsupported", d.reason) end
+    r.effective = d.source
+    if d.source == "shortcut-table" then
+      if d.shortcutsActive == false then
+        -- KB-14: the table is read and the row resolves, only the mode is off. A backend that can change
+        -- the mode gets a bounded temporary enable for the hold; any other keeps the pre-0.6.0 refusal.
+        if canChangeMode then
+          r.modeChange = { target = true, reason = "keyboard shortcuts are off; the shortcut-table route needs them on for the whole hold (temporarily enabled, restored afterwards)" }
+        else
+          unavailable(NEED_MODE)
+          return refuse("shortcuts-inactive", "routes through the shortcut table but keyboard shortcuts are inactive; the operator must enable them (never toggled here)")
+        end
+      elseif d.shortcutsActive ~= true then
+        return refuse("unreadable", "routes through the shortcut table but shortcut enablement cannot be established (" .. tostring(d.shortcutsActiveError or "unreadable") .. "); refused rather than guessed")
+      end
+    end
+    r.supported = true
+    keyboardTuple(d)
+  elseif method == "shortcutOrType" then
+    local d = self:describeKey(key, { executor = opts.executor, prefer = prefer })
+    r.resolution = d
+    local active = d.shortcutsActive
+    if d.code == "unknown-key" or d.code == "bad-key" then return refuse(d.code, d.reason) end
+    if d.supported and d.source ~= "shortcut-table" then
+      -- The fixed (MA) and native (PLEASE) routes do not depend on the shortcut table; they are the
+      -- shortcut side of this method whatever the mode (and these keys never have text).
+      r.supported, r.effective = true, d.source
+      keyboardTuple(d)
+    elseif active == true then
+      if d.supported then
+        r.supported, r.effective = true, d.source
+        keyboardTuple(d)
+      elseif d.code == "no-row" then
+        -- A read table that confirms no row maps the key may select the explicit text mapping.
+        if not entry.text then return refuse("no-mapping", "no keyboard shortcut maps to " .. key .. " and no text mapping is configured for it") end
+        r.supported, r.effective, r.textSelectedBecause = true, "text", "shortcut table read: no row maps " .. key
+        r.modeChange = { target = false, reason = "keyboard shortcuts are on; character events reach the command line only while they are off (temporarily disabled for the insertion, restored afterwards)" }
+        backendNeeds("char", "character events (capabilities.char; " .. NEED_CHAR .. ")")
+        if caps and not canChangeMode then unavailable(NEED_MODE) end
+      else
+        -- Ambiguity, collisions, an unknown PC key or an unreadable table are refusals, never permission to type.
+        return refuse(d.code or "unsupported", tostring(d.reason) .. " (shortcuts are active; this is a refusal, not a fall-through to text)")
+      end
+    elseif active == false then
+      if not entry.text then return refuse("no-mapping", "keyboard shortcuts are inactive and no text mapping is configured for " .. key .. " (a shortcut row is not required for the text route, but the text must be explicit)") end
+      r.supported, r.effective, r.textSelectedBecause = true, "text", "keyboard shortcuts are positively off"
+      r.shortcutsActive = false
+      backendNeeds("char", "character events (capabilities.char; " .. NEED_CHAR .. ")")
+    else
+      return refuse("unreadable", "shortcut enablement cannot be established (" .. tostring(d.shortcutsActiveError or "unreadable") .. "); refused rather than typed")
+    end
+  elseif method == "type" then
+    if not LOGICAL_KEYS[key] then
+      if type(self._deps.virtualKeyCodes) ~= "function" then return refuse("unreadable", "Enums.VirtualKeyCode cannot be read; " .. key .. " cannot be validated as a logical key") end
+      local okV, vk = pcall(self._deps.virtualKeyCodes)
+      if not okV or type(vk) ~= "table" then return refuse("unreadable", "Enums.VirtualKeyCode read failed; " .. key .. " cannot be validated as a logical key") end
+      if vk[key] == nil then return refuse("unknown-key", key .. " is not a logical key of this module and not an Enums.VirtualKeyCode name on this console; text is never derived from arbitrary names") end
+    end
+    if not entry.text then return refuse("no-mapping", "no text mapping is configured for " .. key) end
+    r.supported, r.effective = true, "text"
+    if type(self._deps.shortcutsActive) == "function" then
+      local okA, active = pcall(self._deps.shortcutsActive)
+      if okA and active == true then
+        r.modeChange = { target = false, reason = "keyboard shortcuts are on; character events reach the command line only while they are off (temporarily disabled for the insertion, restored afterwards)" }
+        if not caps then unavailable("no backend attached") elseif not canChangeMode then unavailable(NEED_MODE) end
+      elseif okA and active == false then
+        r.shortcutsActive = false
+      else
+        return refuse("unreadable", "shortcut enablement cannot be established (" .. tostring(okA and ("value " .. tostring(active)) or active) .. "); refused rather than typed")
+      end
+    else
+      return refuse("unreadable", "shortcut enablement cannot be established (deps.shortcutsActive missing); refused rather than typed")
+    end
+    backendNeeds("char", "character events (capabilities.char; " .. NEED_CHAR .. ")")
+  else
+    return refuse("unknown-method", "unknown dispatch method '" .. tostring(method) .. "'")
+  end
+  r.dispatchable = r.supported and #r.unavailable == 0
+  if r.supported and not r.dispatchable then r.code = "unavailable" end
+  return r
+end
+
+
+-- Quickey bank (KB-12) -------------------------------------------------------------
+--
+-- Console access goes through deps.quickeys / deps.executors / deps.showIdentity (consoleDeps builds
+-- them; the harness fakes them). Every read is pcall'd; a raise is a failure of that step, never a
+-- guess. Contract:
+--   quickeys.read(index)  -> nil (empty slot) | { name, code, note, lock, class }
+--   quickeys.create(index) / set(index, { Note, Code, Name }) / delete(index) -> true | false, err
+--   executors.read(page, index) -> { exists, class, empty, object = { class, name, index, note, code } | nil }
+--                                  (index/note/code of the assigned object when it is a Quickey)
+--   executors.assign(page, index, quickeyIndex) / clear(page, index) -> true | false, err
+--   showIdentity() -> string identifying the show file and data pool the objects live in
+--
+-- Reservation (review finding 3): an executor is reserved by assigning the bank's code-less PLACEHOLDER
+-- Quickey ("MCP RESERVED", marker code=RESERVED, slot right after the codes) to it, so the claim is an
+-- object on the console that any other consumer reads as a foreign marker; an empty executor is not a
+-- reservation. Ownership of an assigned executor (finding 2) is the assigned Quickey's pool index, marker
+-- (owner, bank id, code) and Code matching one of this bank's entries, never its name. Every target,
+-- executor and teardown access (finding 1) re-reads the show identity first; a mismatch makes the bank
+-- stale and refuses, and verifyBank() keeps it stale until the identity matches again.
+
+function Instance:_bankDeps()
+  local d = self._deps
+  local missing = {}
+  if type(d.quickeys) ~= "table" or type(d.quickeys.read) ~= "function" then missing[#missing + 1] = "quickeys.read" end
+  if type(d.executors) ~= "table" or type(d.executors.read) ~= "function" then missing[#missing + 1] = "executors.read" end
+  if type(d.virtualKeyCodes) ~= "function" then missing[#missing + 1] = "virtualKeyCodes" end
+  if type(d.showIdentity) ~= "function" then missing[#missing + 1] = "showIdentity" end
+  if #missing > 0 then return nil, { code = "unavailable", message = "the Quickey bank needs console deps " .. table.concat(missing, ", ") .. " (consoleDeps(_G) provides them)" } end
+  return d
+end
+
+local function bankCall(fn, ...)
+  if type(fn) ~= "function" then return false, nil, "operation not provided by deps" end
+  local ok, a, b = pcall(fn, ...)
+  if not ok then return false, nil, "raised: " .. tostring(a) end
+  return true, a, b
+end
+-- A mutating call: false (with its reason) and a raise are both failures.
+local function bankOp(fn, ...)
+  local ok, a, b = bankCall(fn, ...)
+  if not ok then return false, b end
+  if a == false then return false, tostring(b or "refused") end
+  return true
+end
+
+-- Owned-Quickey backend (KB-13) --------------------------------------------------
+--
+-- The console adapter for Quickey tuples. It is bound to the instance that owns the bank (the bank
+-- is the only source of Quickey objects and reserved executors) and dispatches nothing the bank
+-- cannot prove it owns right now. Contract (the fake and Keyboard() adapters' plus the target):
+--   press(tuple)   -> true, nil, nil, target   dispatched on target = { page, executor, quickeyIndex, code, value, bank }
+--                  -> false, nil, err          refused before anything reached the console
+--                  -> raises { message, target } | string   "Press Page P.E" raised: delivery unknown; the
+--                                              instance keeps the record unresolved with the target
+--   release(tuple, target) -> true, nil        "Unpress Page P.E" dispatched on the RECORDED target
+--                  -> false, nil, err          the recorded executor no longer holds the recorded
+--                                              Quickey (or the bank/show differs): nothing issued,
+--                                              the record stays unresolved for the operator + recover()
+--   preflight(tuple, route, ctx), supportsQuickkey(code), quickkeyCapabilities(code), unavailable(code),
+--   observe() (aggregate MASTATE only), supportsKey(pcKey) -> false (no PC keys)
+-- Every console read goes through the instance's bankTarget()/bankExecutor() (show identity gate,
+-- marker/Code/index verification); the only writes are Assign (verified by readback) and Press/Unpress.
+local QuickeyBackend = {}
+QuickeyBackend.__index = QuickeyBackend
+
+local function quickeyBackend(instance, opts)
+  if type(instance) ~= "table" or type(instance.bankTarget) ~= "function" or type(instance.bankExecutor) ~= "function" then
+    error(NAME .. ".quickeyBackend: the hardkeys instance that owns the Quickey bank is required", 2)
+  end
+  opts = opts or {}
+  return setmetatable({
+    name = "quickey", dispatches = true, description = BACKENDS.quickey.description, limitations = QUICKEY_LIMITATIONS,
+    capabilities = shallowCopy(BACKENDS.quickey.capabilities),
+    instance = instance,
+    counters = { press = 0, release = 0, refused = 0, raised = 0, assigned = 0, observe = 0 },
+    lastEvent = nil, events = {}, eventLog = tonumber(opts.eventLog) or DEFAULT_CONFIG.eventLog,
+  }, QuickeyBackend)
+end
+
+function QuickeyBackend:_log(kind, tuple, extra)
+  local e = { kind = kind, quickkey = tuple and tuple.quickkey, quickkeyCode = tuple and tuple.quickkeyCode }
+  if extra then for k, v in pairs(extra) do e[k] = v end end
+  self.events[#self.events + 1] = e
+  while #self.events > self.eventLog do table.remove(self.events, 1) end
+  self.lastEvent = e
+  return e
+end
+
+function QuickeyBackend:_bank()
+  local b = self.instance._bank
+  if b and b.state ~= "removed" then return b end
+  return nil
+end
+
+-- The bank entry a code name selects (aliases folded), or nil, reason.
+function QuickeyBackend:_entry(code)
+  local bank = self:_bank()
+  if not bank then return nil, "no Quickey bank is provisioned on this instance (KB-12: provisionBank(), bridge argument bank=...)" end
+  local key = type(code) == "string" and code:upper() or tostring(code)
+  local canonical = BANK_ALIASES[key] or key
+  local e = bank.byName[canonical]
+  if not e or e.placeholder then return nil, "Quickey code " .. key .. " is not in bank " .. bank.id .. (bank.spec.codes == "qualified" and " (codes = \"qualified\")" or "") end
+  return e, nil, bank
+end
+
+function QuickeyBackend:_deps()
+  local d = self.instance._deps
+  local x = type(d) == "table" and d.executors or nil
+  if type(x) ~= "table" or type(x.press) ~= "function" or type(x.unpress) ~= "function" or type(x.assign) ~= "function" then
+    return nil, "console deps executors.press / unpress / assign are missing (consoleDeps(_G) provides them)"
+  end
+  return x
+end
+
+function QuickeyBackend:supportsKey(pcKey)
+  return false, "the owned-Quickey backend dispatches no PC keys (capabilities.keyboard = false); route the key with the quickkey method"
+end
+
+-- Press-time admission of a code (the instance calls it from _resolveSpec): the code must be in the
+-- bank and carry KB-10 evidence. No console read happens here.
+function QuickeyBackend:supportsQuickkey(code)
+  local e, why = self:_entry(code)
+  if not e then return false, why end
+  if not e.qualified then
+    return false, string.format("Quickey code %s is discovered only (no KB-10 evidence%s); this backend dispatches only qualified codes, nothing is tried", e.name, e.note and (": " .. e.note) or "")
+  end
+  return true
+end
+
+-- Per-code capability flags (the instance prefers them over the adapter-wide ones): the KB-10 evidence
+-- of the code, or all false for a discovered-only code. nil when there is no bank or the code is not in it.
+function QuickeyBackend:quickkeyCapabilities(code)
+  local e = self:_entry(code)
+  if not e then return nil end
+  if not e.qualified then return { tap = false, hold = false, chord = false, note = "discovered only: no KB-10 evidence for this code" .. (e.note and ("; " .. e.note) or "") } end
+  -- A tap on this backend IS a bounded executor hold (Press, then Unpress at the deadline), so a code
+  -- qualified for holds is qualified for taps here (MA1: a direct tap holds nothing, an executor pair does).
+  return { tap = (e.qualified.tap or e.qualified.hold) and true or false, hold = e.qualified.hold and true or false, chord = e.qualified.chord and true or false, note = e.qualified.note }
+end
+
+-- Named requirements a route through this backend is missing right now (reported by describeRoute()).
+function QuickeyBackend:unavailable(code)
+  local out = {}
+  local bank = self:_bank()
+  if not bank then out[1] = "no Quickey bank is provisioned on this instance (KB-12: provisionBank(), bridge argument bank=...)"; return out end
+  if bank.partial then out[#out + 1] = "the Quickey bank was partially torn down; it exists for cleanup only and dispatches nothing" end
+  local e, why = self:_entry(code)
+  if not e then out[#out + 1] = why
+  elseif not e.qualified then out[#out + 1] = string.format("Quickey code %s is discovered only (no KB-10 evidence); this backend dispatches only qualified codes", e.name) end
+  local x, xerr = self:_deps()
+  if not x then out[#out + 1] = xerr end
+  return out
+end
+
+-- Executors of the bank not reserved by a live record of the instance (held, releasing or unresolved).
+function QuickeyBackend:_freeExecutors()
+  local bank = self:_bank()
+  if not bank then return 0, 0 end
+  local inUse = self.instance:_executorsInUse()
+  local free, total = 0, #bank.executors
+  for _, x in ipairs(bank.executors) do if not inUse[x.index] then free = free + 1 end end
+  return free, total
+end
+
+-- Everything that must hold before the first event of a press or combo goes out: a Quickey tuple, a
+-- qualified code, the Quickey re-read as the bank's (bankTarget: show identity, marker, Code, Name)
+-- and enough free reserved executors for this press and the ones planned with it. Nothing is sent.
+function QuickeyBackend:preflight(tuple, route, ctx)
+  if type(tuple) ~= "table" or tuple.pcKey or not tuple.quickkey then return false, "the owned-Quickey backend dispatches Quickey tuples only (no PC keys, no text)" end
+  local ok, why = self:supportsQuickkey(tuple.quickkey)
+  if not ok then return false, why end
+  local x, xerr = self:_deps()
+  if not x then return false, xerr end
+  local t, err = self.instance:bankTarget(tuple.quickkey, self.instance._now)
+  if not t then return false, err.message, err end
+  -- Enough reserved executors that are free AND verify right now (placeholder or a bank code on them),
+  -- for this key and the ones planned with it in a combo, so a chord never starts without a place for
+  -- every key. Each is re-read again right before the press.
+  local need = 1 + (ctx and tonumber(ctx.extra) or 0)
+  local free, total = self:_freeExecutors()
+  if free < need then
+    return false, string.format("no free reserved executor: %d of %d are reserved by live Quickey records and %d would be needed; release or recover before pressing", total - free, total, need)
+  end
+  local inUse, verified, problems = self.instance:_executorsInUse(), 0, {}
+  for _, cand in ipairs(self.instance._bank.executors) do
+    if verified >= need then break end
+    if not inUse[cand.index] then
+      local xr, xerr = self.instance:bankExecutor(cand.index, self.instance._now)
+      if xr then verified = verified + 1 else problems[#problems + 1] = string.format("%d.%d: %s", cand.page, cand.index, tostring(xerr and xerr.message)) end
+    end
+  end
+  if verified < need then
+    return false, string.format("no free reserved executor verifies (%d needed, %d verified, %d held): %s; nothing is re-assigned or repaired here", need, verified, total - free, table.concat(problems, "; "))
+  end
+  return true
+end
+
+function QuickeyBackend:press(tuple)
+  self.counters.press = self.counters.press + 1
+  local function refuse(why)
+    self.counters.refused = self.counters.refused + 1
+    self:_log("press", tuple, { failed = why })
+    return false, nil, why
+  end
+  if type(tuple) ~= "table" or tuple.pcKey or not tuple.quickkey then return refuse("the owned-Quickey backend dispatches Quickey tuples only (no PC keys, no text)") end
+  local okS, why = self:supportsQuickkey(tuple.quickkey)
+  if not okS then return refuse(why) end
+  local x, xerr = self:_deps()
+  if not x then return refuse(xerr) end
+  local inst = self.instance
+  -- The Quickey, re-read right now (show identity, marker, Code, Name). A refusal is the bank's reason.
+  local t, err = inst:bankTarget(tuple.quickkey, inst._now)
+  if not t then return refuse(err.message) end
+  local bank = inst._bank
+  -- A reserved executor nobody holds, re-read right now: it must hold the bank's placeholder or one of
+  -- the bank's code Quickeys (index, marker and Code verified by bankExecutor).
+  local inUse = inst:_executorsInUse()
+  local chosen, reasons = nil, {}
+  for _, cand in ipairs(bank.executors) do
+    if not inUse[cand.index] then
+      local xr, xerr2 = inst:bankExecutor(cand.index, inst._now)
+      if xr then chosen = xr; break end
+      reasons[#reasons + 1] = string.format("%d.%d: %s", cand.page, cand.index, tostring(xerr2 and xerr2.message))
+    end
+  end
+  if not chosen then
+    return refuse("no reserved executor is free and verified: " .. (#reasons > 0 and table.concat(reasons, "; ") or "every reserved executor is held by a live Quickey record") .. "; nothing pressed")
+  end
+  -- Put the code's Quickey on it when another bank Quickey (or the placeholder) is there, verified by readback.
+  if chosen.assigned ~= t.name then
+    local okA, aerr = bankOp(x.assign, chosen.page, chosen.index, t.index)
+    if not okA then return refuse(string.format("Assign Quickey %d At Page %d.%d failed: %s; nothing pressed", t.index, chosen.page, chosen.index, tostring(aerr))) end
+    self.counters.assigned = self.counters.assigned + 1
+    local again, aerr2 = inst:bankExecutor(chosen.index, inst._now)
+    if not again then return refuse(string.format("Page %d.%d does not verify after the assignment: %s; nothing pressed", chosen.page, chosen.index, tostring(aerr2 and aerr2.message))) end
+    if again.assigned ~= t.name then
+      return refuse(string.format("Page %d.%d does not hold Quickey %d (%s) after the assignment (reads %s%s); nothing pressed", chosen.page, chosen.index, t.index, t.name, tostring(again.state), again.assigned and (" " .. again.assigned) or ""))
+    end
+    chosen = again
+  end
+  local target = { page = chosen.page, executor = chosen.index, quickeyIndex = t.index, code = t.name, value = t.value, bank = bank.id }
+  local ok, accepted, feedback = pcall(x.press, chosen.page, chosen.index)
+  if not ok then
+    self.counters.raised = self.counters.raised + 1
+    self:_log("press", tuple, { target = target, raised = tostring(accepted) })
+    error({ message = string.format("Press Page %d.%d (Quickey %d, %s) raised: %s (whether the key went down is unknown)", chosen.page, chosen.index, t.index, t.name, tostring(accepted)), target = target }, 0)
+  end
+  if accepted == false then
+    return refuse(string.format("Press Page %d.%d (Quickey %d, %s) was not accepted by the console: %s; nothing pressed", chosen.page, chosen.index, t.index, t.name, tostring(feedback)))
+  end
+  self:_log("press", tuple, { target = target, feedback = feedback })
+  return true, nil, nil, target  -- dispatched; no per-key confirmation exists on this backend
+end
+
+-- Release on the recorded target only. The executor is re-read and must still hold the recorded
+-- Quickey (the bank's object at the recorded index with the recorded code); otherwise nothing is
+-- issued and the record stays unresolved: the console key may still be down, and the operator restores
+-- the assignment before recover() (KB-10: reassigning the original Quickey back made Unpress work).
+function QuickeyBackend:release(tuple, target)
+  self.counters.release = self.counters.release + 1
+  local function refuse(why)
+    self.counters.refused = self.counters.refused + 1
+    self:_log("release", tuple, { target = target, failed = why })
+    return false, nil, why
+  end
+  if type(target) ~= "table" or type(target.executor) ~= "number" or type(target.page) ~= "number" or type(target.code) ~= "string" then
+    return refuse("the record carries no executor target; a Quickey record is released only on the executor it was pressed on and nothing is resolved again (a record pressed before 0.8.0 or by another backend cannot be released here)")
+  end
+  local x, xerr = self:_deps()
+  if not x then return refuse(xerr) end
+  local inst = self.instance
+  local bank = self:_bank()
+  if not bank then return refuse("no Quickey bank on this instance: the recorded target cannot be verified (adopt the bank record first); nothing issued") end
+  if target.bank and target.bank ~= bank.id then return refuse(string.format("the record belongs to bank %s, this instance holds bank %s; nothing issued", tostring(target.bank), bank.id)) end
+  if target.page ~= bank.spec.executors.page then return refuse(string.format("the recorded executor is on page %d, the bank's executors are on page %d; nothing issued", target.page, bank.spec.executors.page)) end
+  local e = bank.byName[target.code]
+  if not e or e.index ~= target.quickeyIndex then
+    return refuse(string.format("the bank's Quickey for %s is %s, the record was pressed through Quickey %s; nothing issued", target.code, e and tostring(e.index) or "absent", tostring(target.quickeyIndex)))
+  end
+  local xr, err = inst:bankExecutor(target.executor, inst._now)
+  if not xr then
+    return refuse(string.format("Page %d.%d does not verify: %s; the key may still be down on the console: restore Quickey %d (%s) on Page %d.%d and recover (no direct Unpress Quickey is issued)",
+      target.page, target.executor, tostring(err and err.message), target.quickeyIndex, target.code, target.page, target.executor))
+  end
+  if xr.assigned ~= target.code then
+    return refuse(string.format("Page %d.%d holds %s, not the recorded Quickey %d (%s); the key may still be down on the console: restore the assignment and recover (no direct Unpress Quickey is issued)",
+      target.page, target.executor, xr.assigned and ("the bank's " .. xr.assigned) or ("the bank's " .. tostring(xr.state) .. " placeholder"), target.quickeyIndex, target.code))
+  end
+  local ok, accepted, feedback = pcall(x.unpress, target.page, target.executor)
+  if not ok then
+    self.counters.raised = self.counters.raised + 1
+    self:_log("release", tuple, { target = target, raised = tostring(accepted) })
+    error(string.format("Unpress Page %d.%d (Quickey %d, %s) raised: %s (whether the key came up is unknown)", target.page, target.executor, target.quickeyIndex, target.code, tostring(accepted)), 0)
+  end
+  if accepted == false then
+    return refuse(string.format("Unpress Page %d.%d (Quickey %d, %s) was not accepted by the console: %s; the key may still be down", target.page, target.executor, target.quickeyIndex, target.code, tostring(feedback)))
+  end
+  self:_log("release", tuple, { target = target, feedback = feedback })
+  return true, nil  -- dispatched; no per-key confirmation exists on this backend
+end
+
+function QuickeyBackend:observe()
+  self.counters.observe = self.counters.observe + 1
+  local out = { available = false, reason = "a Quickey's pressed state is not readable from Lua; only the aggregate MASTATE is", aggregate = {} }
+  local d = self.instance._deps
+  if type(d) == "table" and type(d.maState) == "function" then
+    local ok, v = pcall(d.maState)
+    if ok and type(v) == "boolean" then out.aggregate.maState = v
+    else out.aggregate.error = ok and ("MASTATE value " .. tostring(v)) or tostring(v) end
+  else
+    out.aggregate.error = "deps.maState missing"
+  end
+  local free, total = self:_freeExecutors()
+  out.executors = { total = total, inUse = total - free }
+  return out
+end
+
+function Instance:_readShowIdentity()
+  if type(self._deps.showIdentity) ~= "function" then return nil, "deps.showIdentity missing" end
+  local ok, v = pcall(self._deps.showIdentity)
+  if not ok then return nil, tostring(v) end
+  if v == nil then return nil, "showIdentity() returned nil" end
+  return tostring(v)
+end
+
+-- Fresh show-identity gate before any target access, executor access or teardown. A mismatch or an
+-- unreadable identity marks the bank stale (cached reads dropped) and returns the refusal.
+-- The state a bank returns to once its show is back or its objects verify: a partially torn-down bank
+-- (cleanup only, dispatch refused) stays "partial" until its last object is gone.
+-- Mixed backend (KB-15) ----------------------------------------------------------
+-- One adapter over two: Quickey tuples go to the owned-Quickey part, PC-key tuples and character events
+-- to the Keyboard() part. It owns nothing and keeps no state: every call is forwarded to the part the
+-- tuple selects, the record remembers that part's name (recordBackend) and a record of either part is
+-- adopted through this adapter (serves). The interference rules (unqualified-mix) live in the instance,
+-- so they hold on every adapter that advertises both kinds, the fake included.
+local MixedBackend = {}
+MixedBackend.__index = MixedBackend
+
+local function mixedBackend(parts)
+  if type(parts) ~= "table" then error(NAME .. ".mixedBackend: a parts table { quickey = <adapter>, keyboard = <adapter> } is required", 2) end
+  local q, k = parts.quickey, parts.keyboard
+  local function isAdapter(a) return type(a) == "table" and type(a.press) == "function" and type(a.release) == "function" and type(a.name) == "string" end
+  if not isAdapter(q) then error(NAME .. ".mixedBackend: parts.quickey must be a backend adapter (quickeyBackend())", 2) end
+  if not isAdapter(k) then error(NAME .. ".mixedBackend: parts.keyboard must be a backend adapter (keyboardBackend())", 2) end
+  if q == k then error(NAME .. ".mixedBackend: the two parts must be different adapters", 2) end
+  if type(q.parts) == "table" or type(k.parts) == "table" or q.name == "mixed" or k.name == "mixed" then error(NAME .. ".mixedBackend: a part cannot itself be a mixed adapter", 2) end
+  local qc, kc = adapterCapabilities(q), adapterCapabilities(k)
+  if not qc.quickkey then error(NAME .. ".mixedBackend: parts.quickey advertises no Quickey dispatch (capabilities.quickkey)", 2) end
+  if not kc.keyboard then error(NAME .. ".mixedBackend: parts.keyboard advertises no PC-key dispatch (capabilities.keyboard)", 2) end
+  local limitations = {}
+  for _, l in ipairs(MIXED_LIMITATIONS) do limitations[#limitations + 1] = l end
+  for _, l in ipairs(q.limitations or (BACKENDS[q.name] and BACKENDS[q.name].limitations) or {}) do limitations[#limitations + 1] = "quickey part: " .. l end
+  for _, l in ipairs(k.limitations or (BACKENDS[k.name] and BACKENDS[k.name].limitations) or {}) do limitations[#limitations + 1] = "keyboard part: " .. l end
+  return setmetatable({
+    name = "mixed", dispatches = true, description = BACKENDS.mixed.description, limitations = limitations,
+    capabilities = { keyboard = kc.keyboard, quickkey = qc.quickkey, char = kc.char, modeChange = kc.modeChange },
+    parts = { quickey = q, keyboard = k },
+    counters = { quickey = q.counters, keyboard = k.counters },
+  }, MixedBackend)
+end
+
+-- The part a tuple selects and its kind ("quickey" | "keyboard"). Text tuples (no key) go to the keyboard part.
+function MixedBackend:partFor(tuple)
+  if type(tuple) == "table" and tuple.quickkey then return self.parts.quickey, "quickey" end
+  return self.parts.keyboard, "keyboard"
+end
+-- The backend name a record of this tuple carries (hold.backend): the part's own name.
+function MixedBackend:recordBackend(tuple) return (self:partFor(tuple)).name end
+-- Records of either part are released through this adapter (_attemptRelease asks).
+function MixedBackend:serves(name) return name == self.name or name == self.parts.quickey.name or name == self.parts.keyboard.name end
+function MixedBackend:supportsKey(pcKey)
+  local k = self.parts.keyboard
+  if type(k.supportsKey) == "function" then return k:supportsKey(pcKey) end
+  return true
+end
+function MixedBackend:supportsQuickkey(code)
+  local q = self.parts.quickey
+  if type(q.supportsQuickkey) == "function" then return q:supportsQuickkey(code) end
+  return true
+end
+function MixedBackend:quickkeyCapabilities(code)
+  local q = self.parts.quickey
+  if type(q.quickkeyCapabilities) == "function" then return q:quickkeyCapabilities(code) end
+  return nil
+end
+function MixedBackend:unavailable(code)
+  local q = self.parts.quickey
+  if type(q.unavailable) == "function" then return q:unavailable(code) end
+  return {}
+end
+function MixedBackend:preflight(tuple, route, ctx)
+  local p = self:partFor(tuple)
+  if type(p.preflight) == "function" then return p:preflight(tuple, route, ctx) end
+  return true
+end
+function MixedBackend:press(tuple) local p = self:partFor(tuple); return p:press(tuple) end
+function MixedBackend:release(tuple, target) local p = self:partFor(tuple); return p:release(tuple, target) end
+function MixedBackend:char(cp, display)
+  local k = self.parts.keyboard
+  if type(k.char) ~= "function" then return false, nil, "the keyboard part has no character events" end
+  return k:char(cp, display)
+end
+-- The keyboard part's observation (per-key state when it has one, the aggregate MASTATE) plus the Quickey
+-- part's under .quickey; tuples the Quickey part reports down join the per-key view.
+function MixedBackend:observe()
+  local k, q = self.parts.keyboard, self.parts.quickey
+  local out
+  if type(k.observe) == "function" then local ok, o = pcall(k.observe, k); if ok and type(o) == "table" then out = o end end
+  if type(out) ~= "table" then out = { available = false, reason = "the keyboard part exposes no observation", aggregate = {} } end
+  if type(q.observe) == "function" then
+    local ok, qo = pcall(q.observe, q)
+    if ok and type(qo) == "table" then
+      out.quickey = qo
+      if type(qo.down) == "table" then out.down = out.down or {}; for tk in pairs(qo.down) do out.down[tk] = true end end
+      out.aggregate = out.aggregate or {}
+      if out.aggregate.maState == nil and type(qo.aggregate) == "table" then out.aggregate.maState = qo.aggregate.maState end
+    end
+  end
+  return out
+end
+
+local function bankBaseState(bank) return bank.partial and "partial" or "degraded" end
+
+function Instance:_bankShowGate(bank)
+  local show, serr = self:_readShowIdentity()
+  if show and show == bank.show then
+    if bank.state == "stale" then bank.state, bank.staleReason = bankBaseState(bank), nil end  -- back on the right show: still needs verifyBank()
+    return true
+  end
+  self:_markBankStale(bank, show and ("show/data pool is '" .. show .. "', the bank belongs to '" .. bank.show .. "'") or ("show identity unreadable: " .. tostring(serr)))
+  local _, e = fail("bank-stale", "the show or data pool differs from the one the bank was provisioned in (" .. tostring(bank.staleReason) .. "); the objects at these indices are not this bank's; load the bank's show (or tear down from there) and run verifyBank()", { bank = bank.id, show = show, bankShow = bank.show })
+  return nil, e
+end
+
+function Instance:_markBankStale(bank, reason)
+  bank.state, bank.staleReason = "stale", reason
+  for _, e in ipairs(bank.codes) do e.lastRead, e.state = nil, "unverified" end
+  for _, x in ipairs(bank.executors) do x.state, x.assigned = "unverified", nil end
+end
+
+-- Reads one Quickey slot and classifies it against an expected entry: "empty", "owned" (marker, code
+-- and name all match), "owned-changed" (our marker but Code or Name differ: an operator edit), "foreign"
+-- (another owner's marker), "other-bank" (our owner, another bank id), "occupied" (no marker).
+function Instance:_classifySlot(index, expect, owner, id)
+  local ok, obj, err = bankCall(self._deps.quickeys.read, index)
+  if not ok then return { state = "error", error = err } end
+  if obj == nil then return { state = "empty" } end
+  if type(obj) ~= "table" then return { state = "error", error = "quickeys.read returned " .. type(obj) } end
+  local r = { state = "occupied", read = { name = obj.name, code = obj.code, note = obj.note, lock = obj.lock, class = obj.class } }
+  if obj.class ~= nil and tostring(obj.class) ~= "Quickey" then r.state, r.error = "error", "slot " .. index .. " holds a " .. tostring(obj.class) .. ", not a Quickey"; return r end
+  local m = parseBankMarker(obj.note)
+  if not m then return r end
+  r.marker = m
+  if m.owner ~= owner then r.state = "foreign"; return r end
+  if m.bank ~= id then r.state = "other-bank"; return r end
+  if expect then
+    local wantCode = expect.placeholder and "" or expect.name
+    local codeOk = tostring(obj.code or "") == wantCode and m.code == expect.name
+    local nameOk = tostring(obj.name) == BANK_NAME_PREFIX .. expect.name
+    if codeOk and nameOk then r.state = "owned"
+    else
+      r.state = "owned-changed"
+      r.changed = {}
+      if not codeOk then r.changed[#r.changed + 1] = string.format("Code is %s (marker %s), expected %s", tostring(obj.code), tostring(m.code), wantCode == "" and "<empty>" or wantCode) end
+      if not nameOk then r.changed[#r.changed + 1] = string.format("Name is '%s', expected '%s'", tostring(obj.name), BANK_NAME_PREFIX .. expect.name) end
+    end
+  else
+    r.state = "owned"
+  end
+  return r
+end
+
+-- Reads one executor and classifies it: "reserved" (holds this bank's placeholder), "assigned" (holds
+-- one of this bank's code Quickeys), "empty", "foreign" (holds a Quickey carrying another bank's or
+-- owner's marker), "occupied" (anything else), "missing", "error". Ownership is the assigned object's
+-- pool index, marker and Code against the bank's entries; the name proves nothing.
+function Instance:_classifyExecutor(page, index, bank)
+  local ok, ex, err = bankCall(self._deps.executors.read, page, index)
+  if not ok then return { state = "error", error = err } end
+  if type(ex) ~= "table" then return { state = "error", error = "executors.read returned " .. type(ex) } end
+  if ex.exists == false then return { state = "missing", error = ex.reason } end
+  if ex.class ~= nil and tostring(ex.class) ~= "Executor" then return { state = "error", error = string.format("Page %d.%d is a %s, not an Executor", page, index, tostring(ex.class)) } end
+  if ex.empty or ex.object == nil then return { state = "empty" } end
+  local o = ex.object
+  local r = { state = "occupied", object = { class = o.class, name = o.name, index = o.index } }
+  if tostring(o.class) ~= "Quickey" then return r end
+  local m = parseBankMarker(o.note)
+  if not m then return r end
+  r.marker = m
+  if m.owner ~= bank.owner or m.bank ~= bank.id then r.state = "foreign"; return r end
+  local e = bank.byName[m.code]
+  if not e then r.state, r.error = "foreign", "marker names code " .. tostring(m.code) .. ", which is not in this bank"; return r end
+  local wantCode = e.placeholder and "" or e.name
+  if tonumber(o.index) ~= e.index or tostring(o.code or "") ~= wantCode then
+    r.state, r.error = "occupied", string.format("assigned Quickey has our marker for %s but index %s / Code '%s' do not match the bank's Quickey %d; not treated as ours", tostring(m.code), tostring(o.index), tostring(o.code), e.index)
+    return r
+  end
+  if e.placeholder then r.state = "reserved" else r.state, r.code = "assigned", e.name end
+  return r
+end
+
+-- Provisions the bank: discovers the codes, preflights every Quickey slot and executor, then creates
+-- what is missing and assigns the placeholder to every empty reserved executor. Nothing is mutated
+-- unless the whole preflight passes; every target is re-read right before it is written; a failure
+-- rolls back only the assignments and objects this call made and can still prove it owns. An existing
+-- bank of the same owner and spec is reused after verification (nothing written).
+function Instance:provisionBank(spec, now)
+  checkReady(self, "provisionBank")
+  checkNow(now, "provisionBank")
+  if type(spec) == "table" and spec.authorized ~= true then
+    return fail("bank-unauthorized", "provisioning creates show objects: the consumer passes authorized = true only for an explicit operator decision (never for a client request)")
+  end
+  local s, err = validateBankSpec(spec, self._config)
+  if not s then return nil, err end
+  if self._bank and self._bank.state ~= "removed" then
+    return fail("bank-exists", "this instance already has a bank (" .. self._bank.id .. ", state " .. self._bank.state .. "); verify it, or tear it down before provisioning another", { bank = self:_bankSummary(now) })
+  end
+  local d; d, err = self:_bankDeps()
+  if not d then return nil, err end
+  local okV, vk = pcall(d.virtualKeyCodes)
+  if not okV or type(vk) ~= "table" then return fail("unreadable", "Enums.VirtualKeyCode cannot be read (" .. tostring(okV and "not a table" or vk) .. "); codes are discovered from the console, never assumed") end
+  local disc, derr = discoverBankCodes(vk, s.codes)
+  if not disc then return fail("bank-invalid", derr) end
+  if #disc.codes == 0 then return fail("bank-invalid", "the selection leaves no code to provision") end
+  local owner, id = self._owner, bankId(self._owner, s)
+  if not bankIsToken(owner) then return fail("bank-invalid", "the instance owner '" .. tostring(owner) .. "' cannot be written into a marker (no whitespace or '=' allowed)") end
+  local show, serr = self:_readShowIdentity()
+  if not show then return fail("unreadable", "the show identity cannot be read (" .. tostring(serr) .. "); cached handles could not be invalidated on a show change") end
+  -- The bank skeleton the classifiers verify against (byName/byIndex filled below; nothing read from it yet).
+  local bank = { id = id, owner = owner, label = s.label, spec = s, state = "ready", show = show, createdAt = now, verifiedAt = now, checkedAt = now,
+                 codes = {}, byName = {}, byIndex = {}, executors = {}, exclusions = disc.exclusions, aliases = disc.aliases,
+                 unresolvedAliases = disc.unresolvedAliases, enumEntries = disc.enumEntries, counters = { created = 0, reused = 0, verifications = 0, targetChecks = 0, refusedTargets = 0 } }
+  local plan, refusals = {}, {}
+  local function addEntry(c, index)
+    local e = { name = c.name, value = c.value, index = index, qualified = c.qualified, note = c.note, placeholder = c.placeholder, state = "unverified" }
+    bank.codes[#bank.codes + 1] = e; bank.byName[e.name], bank.byIndex[e.index] = e, e
+    return e
+  end
+  for rank, c in ipairs(disc.codes) do addEntry(c, s.quickeys.first + rank - 1) end
+  addEntry({ name = BANK_PLACEHOLDER, value = nil, qualified = false, placeholder = true, note = "code-less reservation Quickey assigned to every reserved executor; pressing it does nothing" }, s.quickeys.first + #disc.codes)
+  -- Preflight: the complete reservation, no writes.
+  for _, e in ipairs(bank.codes) do
+    local cls = self:_classifySlot(e.index, e, owner, id)
+    local p = { name = e.name, value = e.value, index = e.index, qualified = e.qualified, note = e.note, placeholder = e.placeholder, slot = cls }
+    if cls.state == "empty" then p.action = "create"
+    elseif cls.state == "owned" then p.action = "reuse"
+    elseif cls.state == "owned-changed" then refusals[#refusals + 1] = { index = e.index, code = e.name, reason = "bank-mismatch", detail = "owned Quickey was modified: " .. table.concat(cls.changed or {}, "; ") .. " (not repaired; tear the bank down or restore the object)" }
+    elseif cls.state == "foreign" then refusals[#refusals + 1] = { index = e.index, code = e.name, reason = "bank-foreign-owner", detail = "Quickey " .. e.index .. " belongs to bank " .. tostring(cls.marker.bank) .. " of owner '" .. tostring(cls.marker.owner) .. "'; a second owner is rejected (no shared arbitration)" }
+    elseif cls.state == "other-bank" then refusals[#refusals + 1] = { index = e.index, code = e.name, reason = "bank-mismatch", detail = "Quickey " .. e.index .. " belongs to another bank of this owner (" .. tostring(cls.marker.bank) .. "); tear that bank down first" }
+    elseif cls.state == "occupied" then refusals[#refusals + 1] = { index = e.index, code = e.name, reason = "slot-occupied", detail = "Quickey " .. e.index .. " exists and carries no marker of this module ('" .. tostring(cls.read and cls.read.name) .. "'); unowned objects are never overwritten" }
+    else refusals[#refusals + 1] = { index = e.index, code = e.name, reason = "unreadable", detail = tostring(cls.error) } end
+    plan[#plan + 1] = p
+  end
+  for i = 0, s.executors.count - 1 do
+    local index = s.executors.first + i
+    local cls = self:_classifyExecutor(s.executors.page, index, bank)
+    local x = { page = s.executors.page, index = index, state = "unverified" }
+    local ref = string.format("%d.%d", s.executors.page, index)
+    if cls.state == "empty" then x.action = "reserve"
+    elseif cls.state == "reserved" then x.action, x.state = "reuse", "reserved"
+    elseif cls.state == "assigned" then x.action, x.state, x.assigned = "reuse", "assigned", cls.code
+    elseif cls.state == "foreign" then refusals[#refusals + 1] = { executor = ref, reason = "executor-foreign-owner", detail = string.format("Page %s holds Quickey '%s' reserved by bank %s of owner '%s'; executors are never shared", ref, tostring(cls.object and cls.object.name), tostring(cls.marker and cls.marker.bank), tostring(cls.marker and cls.marker.owner)) }
+    elseif cls.state == "occupied" then refusals[#refusals + 1] = { executor = ref, reason = "executor-occupied", detail = cls.error or string.format("Page %s holds %s '%s'; the bank reserves only empty executors", ref, tostring(cls.object and cls.object.class), tostring(cls.object and cls.object.name)) }
+    elseif cls.state == "missing" then refusals[#refusals + 1] = { executor = ref, reason = "executor-missing", detail = cls.error or string.format("Page %s does not exist", ref) }
+    else refusals[#refusals + 1] = { executor = ref, reason = "unreadable", detail = tostring(cls.error) } end
+    bank.executors[#bank.executors + 1] = x
+  end
+  if #refusals > 0 then
+    return fail("bank-preflight", string.format("%d of %d Quickey slots / %d executors cannot be reserved; nothing was created (%s)", #refusals, #plan, #bank.executors, refusals[1].reason .. ": " .. refusals[1].detail),
+      { refusals = refusals, plan = plan, executors = bank.executors, exclusions = disc.exclusions })
+  end
+  if type(d.quickeys.create) ~= "function" or type(d.quickeys.set) ~= "function" or type(d.executors.assign) ~= "function" then
+    return fail("unavailable", "deps.quickeys.create/set or deps.executors.assign are missing; the bank can only be reused, not created")
+  end
+  -- Mutation 1: create the missing Quickeys one by one, re-reading each slot right before it is written.
+  local created, assigned, failure = {}, {}, nil
+  local marker = function(code) return bankMarkerText(owner, id, code, s.executors) end
+  for _, p in ipairs(plan) do
+    if p.action == "create" then
+      local again = self:_classifySlot(p.index, p, owner, id)
+      if again.state ~= "empty" then failure = { index = p.index, code = p.name, error = "slot was " .. again.state .. " at the recheck right before creation; it was empty at preflight (another writer?)" }; break end
+      local okC, cerr = bankOp(d.quickeys.create, p.index)
+      if not okC then failure = { index = p.index, code = p.name, error = "create failed: " .. tostring(cerr) }; break end
+      local verify = self:_classifySlot(p.index, nil, owner, id)
+      if verify.state == "error" then failure = { index = p.index, code = p.name, error = "readback after create failed: " .. tostring(verify.error) }; break end
+      if verify.state == "empty" then failure = { index = p.index, code = p.name, error = "create returned but the slot is still empty" }; break end
+      local rec = { index = p.index, name = p.name, written = {} }
+      created[#created + 1] = rec
+      -- Note first (the ownership marker), then Code (not for the placeholder), then Name, each verified by readback.
+      local props = { { "Note", marker(p.name) } }
+      if not p.placeholder then props[#props + 1] = { "Code", p.name } end
+      props[#props + 1] = { "Name", BANK_NAME_PREFIX .. p.name }
+      for _, pv in ipairs(props) do
+        local okS, serr2 = bankOp(d.quickeys.set, p.index, { [pv[1]] = pv[2] })
+        if not okS then failure = { index = p.index, code = p.name, error = "set " .. pv[1] .. " failed: " .. tostring(serr2) }; break end
+        rec.written[pv[1]] = pv[2]
+      end
+      if failure then break end
+      local final = self:_classifySlot(p.index, p, owner, id)
+      if final.state ~= "owned" then
+        failure = { index = p.index, code = p.name, error = "readback after the writes: " .. final.state .. (final.changed and (" (" .. table.concat(final.changed, "; ") .. ")") or (final.error and (": " .. final.error) or "")) .. "; the console accepted the writes but the object does not read back as expected" }
+        break
+      end
+      rec.verified = true
+      p.action, p.slot = "created", final
+    end
+  end
+  -- Mutation 2: reserve the empty executors by assigning the placeholder, each re-read right before.
+  local placeholder = bank.byName[BANK_PLACEHOLDER]
+  if not failure then
+    for _, x in ipairs(bank.executors) do
+      if x.action == "reserve" then
+        local again = self:_classifyExecutor(x.page, x.index, bank)
+        if again.state ~= "empty" then failure = { executor = string.format("%d.%d", x.page, x.index), error = "executor was " .. again.state .. " at the recheck right before the reservation; it was empty at preflight (another writer?)" }; break end
+        local okA, aerr = bankOp(d.executors.assign, x.page, x.index, placeholder.index)
+        if not okA then failure = { executor = string.format("%d.%d", x.page, x.index), error = "assign failed: " .. tostring(aerr) }; break end
+        assigned[#assigned + 1] = x
+        local verify = self:_classifyExecutor(x.page, x.index, bank)
+        if verify.state ~= "reserved" then failure = { executor = string.format("%d.%d", x.page, x.index), error = "readback after the assignment: " .. verify.state .. (verify.error and (": " .. verify.error) or "") .. "; the executor does not hold the placeholder as expected" }; break end
+        x.action, x.state = "reserved-now", "reserved"
+      end
+    end
+  end
+  if failure then
+    local rb = self:_rollbackCreated(created, assigned, bank)
+    return fail("bank-partial", string.format("provisioning stopped at %s: %s; %d object(s) created in this call were removed, %d kept, %d executor reservation(s) cleared",
+        failure.index and ("Quickey " .. failure.index .. " (" .. tostring(failure.code) .. ")") or ("Page " .. tostring(failure.executor)), failure.error, #rb.removed, #rb.kept, #rb.cleared),
+      { failed = failure, removed = rb.removed, kept = rb.kept, cleared = rb.cleared, plan = plan })
+  end
+  for _, p in ipairs(plan) do
+    local e = bank.byIndex[p.index]
+    e.state, e.created, e.lastRead, e.lastReadAt = "ok", p.action == "created", p.slot.read, now
+    if e.created then bank.counters.created = bank.counters.created + 1 else bank.counters.reused = bank.counters.reused + 1 end
+  end
+  for _, x in ipairs(bank.executors) do x.reservedNow = x.action == "reserved-now"; x.action = nil; x.lastReadAt = now end
+  self._bank = bank
+  return self:_bankSummary(now, { created = bank.counters.created, reused = bank.counters.reused })
+end
+
+-- Undoes what the current provisionBank() call did after a failure: clears executors it assigned (only
+-- while they still hold the placeholder) and deletes objects it created that still read back as ours
+-- (marker written, or still exactly as created with nothing else written) and unchanged.
+function Instance:_rollbackCreated(created, assigned, bank)
+  local out = { removed = {}, kept = {}, cleared = {} }
+  local d = self._deps
+  for i = #assigned, 1, -1 do
+    local x = assigned[i]
+    local ref = string.format("%d.%d", x.page, x.index)
+    local cls = self:_classifyExecutor(x.page, x.index, bank)
+    if cls.state == "reserved" and type(d.executors.clear) == "function" then
+      local okC, cerr = bankOp(d.executors.clear, x.page, x.index)
+      local after = okC and self:_classifyExecutor(x.page, x.index, bank) or nil
+      if okC and after and after.state == "empty" then out.cleared[#out.cleared + 1] = { executor = ref }
+      else out.kept[#out.kept + 1] = { executor = ref, reason = okC and ("clear returned but the executor reads back " .. tostring(after and after.state)) or ("clear failed: " .. tostring(cerr)) } end
+    elseif cls.state ~= "empty" then
+      out.kept[#out.kept + 1] = { executor = ref, reason = "no longer holds the placeholder (" .. cls.state .. "); left alone" }
+    end
+  end
+  for i = #created, 1, -1 do
+    local rec = created[i]
+    local ok, obj, err = bankCall(d.quickeys.read, rec.index)
+    local why
+    if not ok then why = "unreadable: " .. tostring(err)
+    elseif obj == nil then out.removed[#out.removed + 1] = { index = rec.index, code = rec.name, note = "already gone" }
+    else
+      local m = parseBankMarker(obj.note)
+      local ours
+      if rec.written.Note then
+        ours = m ~= nil and m.owner == bank.owner and m.bank == bank.id and m.code == rec.name
+          and (rec.written.Code == nil or tostring(obj.code) == rec.written.Code) and (rec.written.Name == nil or tostring(obj.name) == rec.written.Name)
+        if not ours then why = "the object no longer reads back as written (marker/code/name differ); kept" end
+      else
+        -- Nothing was written yet: a freshly created Quickey has an empty Note and no Code.
+        ours = (obj.note == nil or obj.note == "") and (obj.code == nil or obj.code == "" or obj.code == "UNKNOWN" or obj.code == "0")
+        if not ours then why = "created but something else already wrote to it (" .. tostring(obj.code) .. "/'" .. tostring(obj.note) .. "'); kept" end
+      end
+      if ours then
+        if type(d.quickeys.delete) ~= "function" then why = "deps.quickeys.delete missing"
+        else
+          local okD, derr = bankOp(d.quickeys.delete, rec.index)
+          if not okD then why = "delete failed: " .. tostring(derr)
+          else
+            local okR, after = bankCall(d.quickeys.read, rec.index)
+            if okR and after == nil then out.removed[#out.removed + 1] = { index = rec.index, code = rec.name }
+            else why = "delete returned but the slot still reads back" end
+          end
+        end
+      end
+    end
+    if why then out.kept[#out.kept + 1] = { index = rec.index, code = rec.name, reason = why } end
+  end
+  return out
+end
+
+-- Re-reads the show identity, then every Quickey and executor of the bank, and records what changed.
+-- Nothing is written. On another show the bank stays STALE (the objects there are not inspected: they
+-- are not this bank's) and target access stays refused.
+function Instance:verifyBank(now)
+  checkReady(self, "verifyBank")
+  checkNow(now, "verifyBank")
+  local bank = self._bank
+  if not bank or bank.state == "removed" then return fail("no-bank", "no Quickey bank is provisioned on this instance") end
+  local d, err = self:_bankDeps()
+  if not d then return nil, err end
+  bank.counters.verifications = bank.counters.verifications + 1
+  bank.checkedAt = now
+  local show, serr = self:_readShowIdentity()
+  if not show or show ~= bank.show then
+    self:_markBankStale(bank, show and ("show/data pool is '" .. show .. "', the bank belongs to '" .. bank.show .. "'") or ("show identity unreadable: " .. tostring(serr)))
+    bank.problems = { { kind = "show", detail = bank.staleReason .. "; objects were not inspected and dispatch stays refused" } }
+    return self:_bankSummary(now, { problems = bank.problems })
+  end
+  local problems = {}
+  for _, e in ipairs(bank.codes) do
+    local cls = self:_classifySlot(e.index, e, bank.owner, bank.id)
+    e.lastReadAt = now
+    if cls.state == "owned" then e.state, e.problem, e.lastRead = "ok", nil, cls.read
+    elseif cls.state == "empty" then e.state, e.problem = "missing", "Quickey " .. e.index .. " was deleted"
+    elseif cls.state == "owned-changed" then e.state, e.problem, e.lastRead = "changed", table.concat(cls.changed or {}, "; "), cls.read
+    elseif cls.state == "error" then e.state, e.problem = "unreadable", tostring(cls.error)
+    else e.state, e.problem, e.lastRead = "replaced", "Quickey " .. e.index .. " is now " .. cls.state .. " ('" .. tostring(cls.read and cls.read.name) .. "')", cls.read end
+    if e.state ~= "ok" then problems[#problems + 1] = { kind = "quickey", index = e.index, code = e.name, state = e.state, detail = e.problem } end
+  end
+  for _, x in ipairs(bank.executors) do
+    self:_applyExecutorClass(x, self:_classifyExecutor(x.page, x.index, bank), now)
+    if x.problem then problems[#problems + 1] = { kind = "executor", executor = string.format("%d.%d", x.page, x.index), state = x.state, detail = x.problem } end
+  end
+  bank.verifiedAt, bank.problems = now, problems
+  bank.state = bank.partial and "partial" or (#problems == 0 and "ready" or "degraded")
+  bank.staleReason = nil
+  return self:_bankSummary(now, { problems = problems })
+end
+
+-- Records an executor classification on the bank entry. Only "reserved" and "assigned" are healthy: an
+-- empty reserved executor lost its visible claim (another consumer could take it) and is a problem too.
+function Instance:_applyExecutorClass(x, cls, now)
+  if type(now) == "number" then x.lastReadAt = now end
+  x.problem = nil
+  if cls.state == "reserved" then x.state, x.assigned = "reserved", nil
+  elseif cls.state == "assigned" then x.state, x.assigned = "assigned", cls.code
+  elseif cls.state == "empty" then x.state, x.assigned, x.problem = "unreserved", nil, string.format("Page %d.%d is empty: the placeholder reservation was removed (not re-assigned here; tear down and provision again)", x.page, x.index)
+  elseif cls.state == "foreign" then x.state, x.assigned, x.problem = "foreign", nil, string.format("Page %d.%d holds Quickey '%s' of bank %s (owner '%s'); not ours", x.page, x.index, tostring(cls.object and cls.object.name), tostring(cls.marker and cls.marker.bank), tostring(cls.marker and cls.marker.owner))
+  elseif cls.state == "missing" then x.state, x.assigned, x.problem = "missing", nil, cls.error or string.format("Page %d.%d no longer exists", x.page, x.index)
+  elseif cls.state == "error" then x.state, x.assigned, x.problem = "unreadable", nil, tostring(cls.error)
+  else x.state, x.assigned, x.problem = "occupied", nil, cls.error or string.format("Page %d.%d now holds %s '%s' (not ours)", x.page, x.index, tostring(cls.object and cls.object.class), tostring(cls.object and cls.object.name)) end
+  return x
+end
+
+-- Dispatch-time check of one code (KB-13 calls it before every press): the show must be the bank's and
+-- the Quickey must still read back as this bank's object with this code. A missing, changed or replaced
+-- object is refused; nothing is repaired. Returns { index, value, name, qualified, note, executors } or nil, err.
+function Instance:bankTarget(codeName, now)
+  checkReady(self, "bankTarget")
+  local bank = self._bank
+  if not bank or bank.state == "removed" then return fail("no-bank", "no Quickey bank is provisioned on this instance") end
+  local key = type(codeName) == "string" and codeName:upper() or tostring(codeName)
+  local canonical = BANK_ALIASES[key] or key
+  local e = bank.byName[canonical]
+  if bank.partial then return fail("bank-partial", "the bank was partially torn down (" .. #bank.codes .. " object(s) left that did not verify as ours); it exists for cleanup only and dispatches nothing; restore or remove the objects and tear it down", { bank = bank.id }) end
+  if not e or e.placeholder then return fail("code-not-in-bank", "code " .. key .. " is not in bank " .. bank.id .. (bank.spec.codes == "qualified" and " (codes = \"qualified\")" or ""), { bank = bank.id }) end
+  local d, err = self:_bankDeps()
+  if not d then return nil, err end
+  local okShow, serr2 = self:_bankShowGate(bank)
+  if not okShow then return nil, serr2 end
+  bank.counters.targetChecks = bank.counters.targetChecks + 1
+  local cls = self:_classifySlot(e.index, e, bank.owner, bank.id)
+  if type(now) == "number" then e.lastReadAt = now end
+  if cls.state ~= "owned" then
+    bank.counters.refusedTargets = bank.counters.refusedTargets + 1
+    local why
+    if cls.state == "empty" then e.state, why = "missing", "Quickey " .. e.index .. " was deleted"
+    elseif cls.state == "owned-changed" then e.state, why = "changed", "Quickey " .. e.index .. " was modified: " .. table.concat(cls.changed or {}, "; ")
+    elseif cls.state == "error" then e.state, why = "unreadable", tostring(cls.error)
+    else e.state, why = "replaced", "Quickey " .. e.index .. " is now " .. cls.state .. " ('" .. tostring(cls.read and cls.read.name) .. "')" end
+    e.problem = why
+    bank.state = "degraded"
+    return fail("bank-object-" .. (e.state == "missing" and "missing" or "changed"), why .. "; dispatch through it is refused and nothing is repaired (verify or re-provision explicitly)", { index = e.index, quickeyCode = e.name, state = e.state })
+  end
+  e.state, e.problem, e.lastRead = "ok", nil, cls.read
+  return { name = e.name, alias = (canonical ~= key) and key or nil, value = e.value, index = e.index, qualified = e.qualified, note = e.note, bank = bank.id,
+           executors = { page = bank.spec.executors.page, first = bank.spec.executors.first, count = bank.spec.executors.count } }
+end
+
+-- Dispatch-time check of one reserved executor (KB-13): the show must be the bank's and the executor
+-- must hold this bank's placeholder or one of its code Quickeys (verified by index, marker and code).
+-- Returns the executor record or nil, err.
+function Instance:bankExecutor(index, now)
+  checkReady(self, "bankExecutor")
+  local bank = self._bank
+  if not bank or bank.state == "removed" then return fail("no-bank", "no Quickey bank is provisioned on this instance") end
+  local x
+  for _, cand in ipairs(bank.executors) do if cand.index == index then x = cand; break end end
+  if not x then return fail("executor-not-in-bank", string.format("Page %d.%d is not one of the bank's reserved executors", bank.spec.executors.page, tonumber(index) or -1)) end
+  if bank.partial then return fail("bank-partial", "the bank was partially torn down; it exists for cleanup only and its executors are not used", { bank = bank.id }) end
+  local d, err = self:_bankDeps()
+  if not d then return nil, err end
+  local okShow, serr2 = self:_bankShowGate(bank)
+  if not okShow then return nil, serr2 end
+  self:_applyExecutorClass(x, self:_classifyExecutor(x.page, x.index, bank), now)
+  if x.problem then
+    bank.state = "degraded"
+    return fail("bank-executor-" .. x.state, x.problem .. "; the executor is not used and nothing is repaired", { page = x.page, index = x.index, state = x.state })
+  end
+  return { page = x.page, index = x.index, state = x.state, assigned = x.assigned, placeholder = bank.byName[BANK_PLACEHOLDER] and bank.byName[BANK_PLACEHOLDER].index or nil }
+end
+
+-- Explicit teardown: on the bank's show only, clears only executors that hold a verified bank Quickey
+-- (placeholder or code) and deletes only Quickeys that still verify as this bank's. Refused while any
+-- Quickey ownership record is live (release-all is a separate operation and comes first). Objects that
+-- fail verification are skipped and reported, never deleted.
+function Instance:teardownBank(now, opts)
+  checkReady(self, "teardownBank")
+  checkNow(now, "teardownBank")
+  opts = opts or {}
+  if opts.authorized ~= true then return fail("bank-unauthorized", "teardown deletes show objects: the consumer passes authorized = true only for an explicit operator decision") end
+  local bank = self._bank
+  if not bank or bank.state == "removed" then return fail("no-bank", "no Quickey bank is provisioned on this instance") end
+  local live = 0
+  for _, h in pairs(self._holds) do if h.state ~= "released" and h.quickkey then live = live + 1 end end
+  if live > 0 then return fail("bank-in-use", live .. " Quickey ownership record(s) are held or unresolved; release or recover them before tearing the bank down (deleting a Quickey during a hold leaves the key down, KB-10)", { live = live }) end
+  local d, err = self:_bankDeps()
+  if not d then return nil, err end
+  if type(d.quickeys.delete) ~= "function" then return fail("unavailable", "deps.quickeys.delete is missing") end
+  local okShow, serr2 = self:_bankShowGate(bank)
+  if not okShow then return nil, serr2 end
+  local removed, skipped, cleared = {}, {}, {}
+  -- Executors first: an assignment to a Quickey that is about to be deleted would dangle.
+  for _, x in ipairs(bank.executors) do
+    local ref = string.format("%d.%d", x.page, x.index)
+    local cls = self:_classifyExecutor(x.page, x.index, bank)
+    if cls.state == "reserved" or cls.state == "assigned" then
+      if type(d.executors.clear) ~= "function" then skipped[#skipped + 1] = { executor = ref, reason = "deps.executors.clear missing" }
+      else
+        local okC, cerr = bankOp(d.executors.clear, x.page, x.index)
+        local after = okC and self:_classifyExecutor(x.page, x.index, bank) or nil
+        if okC and after and after.state == "empty" then cleared[#cleared + 1] = { executor = ref, held = cls.state == "assigned" and cls.code or BANK_PLACEHOLDER }; x.state, x.assigned, x.problem = "released", nil, nil
+        else skipped[#skipped + 1] = { executor = ref, reason = okC and ("clear returned but the executor reads back " .. tostring(after and after.state)) or ("clear failed: " .. tostring(cerr)) } end
+      end
+    elseif cls.state ~= "empty" and cls.state ~= "missing" then
+      skipped[#skipped + 1] = { executor = ref, reason = cls.error or (cls.state == "foreign" and "holds another bank's Quickey; left alone" or ("holds " .. tostring(cls.object and cls.object.class) .. " '" .. tostring(cls.object and cls.object.name) .. "', not ours; left alone")) }
+    end
+  end
+  local remaining = {}
+  for _, e in ipairs(bank.codes) do
+    local cls = self:_classifySlot(e.index, e, bank.owner, bank.id)
+    if cls.state == "empty" then removed[#removed + 1] = { index = e.index, code = e.name, note = "already gone" }
+    elseif cls.state == "owned" then
+      local okD, derr = bankOp(d.quickeys.delete, e.index)
+      local after = okD and self:_classifySlot(e.index, e, bank.owner, bank.id) or nil
+      if okD and after and after.state == "empty" then removed[#removed + 1] = { index = e.index, code = e.name }
+      else
+        e.state, e.problem = "unreadable", okD and ("delete returned but the slot reads back " .. tostring(after and after.state)) or ("delete failed: " .. tostring(derr))
+        skipped[#skipped + 1] = { index = e.index, code = e.name, reason = e.problem }; remaining[#remaining + 1] = e
+      end
+    else
+      e.state = cls.state == "owned-changed" and "changed" or (cls.state == "error" and "unreadable" or "replaced")
+      e.problem = cls.changed and table.concat(cls.changed, "; ") or cls.error or ("slot is " .. cls.state .. " ('" .. tostring(cls.read and cls.read.name) .. "')")
+      skipped[#skipped + 1] = { index = e.index, code = e.name, reason = e.problem .. "; not ours as it stands, left alone" }; remaining[#remaining + 1] = e
+    end
+  end
+  local summary
+  if #remaining == 0 then
+    bank.state = "removed"
+    summary = self:_bankSummary(now)
+    self._bank = nil
+  else
+    bank.codes = remaining
+    bank.byName, bank.byIndex = {}, {}
+    for _, e in ipairs(remaining) do bank.byName[e.name], bank.byIndex[e.index] = e, e end
+    bank.state, bank.partial = "partial", true
+    summary = self:_bankSummary(now)
+  end
+  summary.removed, summary.skipped, summary.cleared = removed, skipped, cleared
+  summary.complete = #remaining == 0
+  return summary
+end
+
+-- Adopts a bank record handed back by dispose() (or kept by the consumer across a restart): verifies
+-- every object against the console before the record is trusted; nothing is created.
+function Instance:adoptBank(record, now)
+  checkReady(self, "adoptBank")
+  checkNow(now, "adoptBank")
+  if self._bank and self._bank.state ~= "removed" then return fail("bank-exists", "this instance already has a bank (" .. self._bank.id .. ")") end
+  if type(record) ~= "table" or type(record.id) ~= "string" or type(record.spec) ~= "table" or type(record.codes) ~= "table" then
+    return fail("bad-argument", "adoptBank needs the record returned by dispose().bank")
+  end
+  if record.owner ~= self._owner then return fail("bank-foreign-owner", "the record belongs to owner '" .. tostring(record.owner) .. "', this instance is '" .. self._owner .. "'") end
+  local s, err = validateBankSpec({ authorized = true, quickeys = record.spec.quickeys, executors = record.spec.executors, codes = record.spec.codes, label = record.spec.label }, self._config)
+  if not s then return nil, err end
+  if bankId(self._owner, s) ~= record.id then return fail("bank-mismatch", "the record's id does not match its spec") end
+  local partial = record.partial == true
+  local bank = { id = record.id, owner = self._owner, label = s.label, spec = s, state = partial and "partial" or "degraded", partial = partial or nil, show = record.show or "", createdAt = record.createdAt, adoptedAt = now, verifiedAt = nil, checkedAt = now,
+                 codes = {}, byName = {}, byIndex = {}, executors = {}, exclusions = record.exclusions or {}, aliases = record.aliases or {}, unresolvedAliases = record.unresolvedAliases or {},
+                 enumEntries = record.enumEntries, counters = { created = 0, reused = 0, verifications = 0, targetChecks = 0, refusedTargets = 0 } }
+  local hasPlaceholder = false
+  for _, c in ipairs(record.codes) do
+    if type(c) == "table" and type(c.name) == "string" and type(c.index) == "number" then
+      local e = { name = c.name, value = c.value, index = c.index, qualified = c.qualified, note = c.note, placeholder = c.placeholder and true or nil, state = "unverified" }
+      if e.placeholder then hasPlaceholder = true end
+      bank.codes[#bank.codes + 1] = e; bank.byName[e.name], bank.byIndex[e.index] = e, e
+    end
+  end
+  if #bank.codes == 0 then return fail("bad-argument", "the record lists no codes") end
+  -- A partially torn-down bank legitimately lacks the placeholder (deleted with the rest): it is adopted for
+  -- cleanup only. A complete record without it predates the executor reservation and is refused.
+  if not hasPlaceholder and not partial then return fail("bad-argument", "the record has no reservation placeholder entry; it predates the executor reservation and cannot be adopted (tear down from its own version, or delete the objects by hand)") end
+  for i = 0, s.executors.count - 1 do bank.executors[#bank.executors + 1] = { page = s.executors.page, index = s.executors.first + i, state = "unverified" } end
+  if not record.show or record.show == "" then return fail("bad-argument", "the record carries no show identity") end
+  self._bank = bank
+  local v, verr = self:verifyBank(now)
+  if not v then self._bank = nil; return nil, verr end
+  v.adopted = true
+  return v
+end
+
+-- The record dispose() hands back (and status().bank.record mirrors): enough to adoptBank() later.
+function Instance:_bankRecord()
+  local bank = self._bank
+  if not bank then return nil end
+  local codes = {}
+  for _, e in ipairs(bank.codes) do codes[#codes + 1] = { name = e.name, value = e.value, index = e.index, qualified = e.qualified, note = e.note, placeholder = e.placeholder } end
+  return { id = bank.id, owner = bank.owner, spec = { quickeys = bank.spec.quickeys, executors = bank.spec.executors, codes = bank.spec.codes, label = bank.spec.label },
+           show = bank.show, createdAt = bank.createdAt, partial = bank.partial or nil, codes = codes, exclusions = bank.exclusions, aliases = bank.aliases, unresolvedAliases = bank.unresolvedAliases, enumEntries = bank.enumEntries }
+end
+
+-- Bounded freshness check from service(): the show identity is re-read every config.bankCheckMs; a
+-- change marks the bank stale (cached reads dropped, dispatch refused until verifyBank()). No object is
+-- re-read here; that is verifyBank()'s explicit, complete pass.
+function Instance:_serviceBank(now)
+  local bank = self._bank
+  if not bank or bank.state == "removed" then return nil end
+  if bank.checkedAt and (now - bank.checkedAt) * 1000 < self._config.bankCheckMs then return { state = bank.state } end
+  bank.checkedAt = now
+  local show, serr = self:_readShowIdentity()
+  if not show then
+    self:_markBankStale(bank, "show identity unreadable: " .. tostring(serr))
+  elseif show ~= bank.show and bank.state ~= "stale" then
+    self:_markBankStale(bank, "show/data pool changed from '" .. bank.show .. "' to '" .. show .. "'")
+  end
+  return { state = bank.state, staleReason = bank.staleReason }
+end
+
+function Instance:bankStatus(now)
+  checkLive(self, "bankStatus")
+  return self:_bankSummary(now)
+end
+
+function Instance:_bankSummary(now, extra)
+  local bank = self._bank
+  if not bank then return { provisioned = false, note = "no Quickey bank; provisionBank({ authorized = true, quickeys = { first }, executors = { page, first, count } }) is the operator's explicit setup" } end
+  local codes, qualified, discovered, problems, placeholder = {}, 0, 0, 0, nil
+  for _, e in ipairs(bank.codes) do
+    local c = { name = e.name, value = e.value, index = e.index, qualified = e.qualified, note = e.note, state = e.state, problem = e.problem, created = e.created, lastReadAt = e.lastReadAt, placeholder = e.placeholder }
+    if e.placeholder then placeholder = c else
+      codes[#codes + 1] = c
+      if e.qualified then qualified = qualified + 1 else discovered = discovered + 1 end
+    end
+    if e.state ~= "ok" then problems = problems + 1 end
+  end
+  local executors = {}
+  for _, x in ipairs(bank.executors) do executors[#executors + 1] = { page = x.page, index = x.index, state = x.state, assigned = x.assigned, problem = x.problem, reservedNow = x.reservedNow } end
+  local out = { provisioned = true, id = bank.id, owner = bank.owner, label = bank.label, state = bank.state, partial = bank.partial or nil, staleReason = bank.staleReason, show = bank.show,
+                spec = { quickeys = bank.spec.quickeys, executors = bank.spec.executors, codes = bank.spec.codes },
+                codeCount = #codes, qualifiedCount = qualified, discoveredCount = discovered, problemCount = problems,
+                codes = codes, placeholder = placeholder, executors = executors, exclusions = bank.exclusions, aliases = bank.aliases, unresolvedAliases = bank.unresolvedAliases, enumEntries = bank.enumEntries,
+                createdAt = bank.createdAt, adoptedAt = bank.adoptedAt, verifiedAt = bank.verifiedAt, checkedAt = bank.checkedAt, counters = shallowCopy(bank.counters), problems = bank.problems,
+                record = self:_bankRecord(),
+                note = "qualified = KB-10 evidence per code (tap/hold/chord); discovered codes are provisioned but a backend must not advertise them; reserved executors hold the bank's code-less placeholder Quickey so the claim is visible to other consumers; every dispatch re-reads the show identity and its Quickey (bankTarget) and nothing is ever repaired" }
+  if extra then for k, v in pairs(extra) do out[k] = v end end
+  return out
 end
 
 -- Operator decision: stop admitting presses and attempt to release everything held. Records whose
@@ -954,6 +2720,12 @@ function Instance:_admission(now)
              description = string.format("%d unresolved release record(s): %s (hold %s, session '%s') may still be down (%s); recover it (owner recover, or the operator's \"input recover\") before anything else runs",
                count, tostring(unresolved.logical or unresolved.tupleKey), unresolved.id, unresolved.session, tostring(unresolved.unresolved and unresolved.unresolved.reason)) }
   end
+  local op = self._mode
+  if op and op.state == "unresolved" then
+    return { code = "busy", reason = "restoration", owner = op.owner, mode = op.id, original = op.original, target = op.target, profile = op.profile,
+             description = string.format("the keyboard-shortcut mode restoration %s (session '%s', profile '%s', shortcuts %s -> %s) is unresolved: %s; recover it (owner recover, or the operator's \"input recover\") before anything else runs",
+               op.id, tostring(op.owner), op.profile, tostring(op.original), tostring(op.target), tostring(op.unresolved and op.unresolved.reason)) }
+  end
   return nil
 end
 
@@ -1052,6 +2824,7 @@ function Instance:tap(sessionId, now, spec, holdMs, ctx)
   if plan.duplicate then return fail("conflict", "tuple is already held by this session; a tap cannot be layered on a hold", { hold = plan.duplicate.id }) end
   local hold, derr = self:_dispatchPress(s, plan, now)
   if not hold then return nil, derr end
+  if hold.kind == "text" then return self:_holdReport(hold, now, { note = "text route: inserted on press, nothing to release at the tap deadline" }) end
   hold.kind = "tap"
   self:_setDeadline(hold, now + holdMs / 1000, "tap")
   return self:_holdReport(hold, now)
@@ -1133,6 +2906,10 @@ function Instance:release(sessionId, now, selector)
   local hold, herr = self:_findHold(sessionId, selector)
   if not hold then return nil, herr end
   if hold.state == "released" then return self:_holdReport(hold, now, { alreadyReleased = true }) end
+  if hold.state == "retained" or hold.state == "quarantined" or hold.kind == "text" then
+    -- Nothing is down: a text route inserts on press and nothing on release; a retained key is already up.
+    return self:_holdReport(hold, now, { alreadyReleased = true, note = hold.kind == "text" and "text route: nothing on release" or "already released; the record waits for the mode restoration" })
+  end
   local r = self:_attemptRelease(hold, now, "client-release")
   return self:_holdReport(hold, now, { attempt = r })
 end
@@ -1157,6 +2934,16 @@ function Instance:recover(sessionId, now)
   end
   local result = self:_releaseHolds(list, now, "recover")
   result.scope = sessionId or "all"
+  -- KB-14: an unresolved restoration of this session (or any, operator scope) is re-read and restored.
+  -- A release attempted in this call is a dependent key event for an adopted restoration (its dependency
+  -- list did not survive the previous instance), so the restore window starts now, never in this call.
+  local op = self._mode
+  if op and op.adopted and result.attempted > 0 then op.lastEventAt = now end
+  if op and op.state == "unresolved" and (sessionId == nil or op.owner == sessionId) then
+    result.restoration = self:_recoverMode(now)
+  elseif op and op.state == "unresolved" then
+    result.restoration = { id = op.id, state = "unresolved", owner = op.owner, skipped = "belongs to session '" .. tostring(op.owner) .. "'" }
+  end
   return result
 end
 
@@ -1168,8 +2955,8 @@ function Instance:adopt(records, now, sessionId)
   sessionId = sessionId or "previous-run"
   local adopted, rejected = {}, {}
   for _, rec in ipairs(records or {}) do
-    if type(rec) ~= "table" or type(rec.pcKey) ~= "string" or rec.pcKey == "" then
-      rejected[#rejected + 1] = { record = rec, reason = "no pcKey" }
+    if type(rec) ~= "table" or ((type(rec.pcKey) ~= "string" or rec.pcKey == "") and (type(rec.quickkey) ~= "string" or rec.quickkey == "")) then
+      rejected[#rejected + 1] = { record = rec, reason = "no pcKey or quickkey" }
     else
       local tuple = copyTuple(rec)
       local tk = tupleKey(tuple)
@@ -1187,6 +2974,7 @@ function Instance:adopt(records, now, sessionId)
         hold.logical = rec.logical
         -- The originating backend travels with the record; "unknown" is never released through any adapter.
         hold.backend = type(rec.backend) == "string" and rec.backend or "unknown"
+        hold.target = type(rec.target) == "table" and shallowCopy(rec.target) or nil
         hold.exclusive = rec.exclusive and true or false
         hold.pressedAt = rec.pressedAt or now
         hold.dispatch = shallowCopy(rec.dispatch) or hold.dispatch
@@ -1351,6 +3139,10 @@ function Instance:_textContext(st)
   if st.acknowledgeFocus ~= true then
     return nil, { code = "focus-unverified", message = "text needs acknowledgeFocus = true: which element receives characters (the command line or a text field) cannot be observed from Lua, so the caller states it; only the command line can be read back afterwards" }
   end
+  if self._mode and self._mode.state ~= "restored" then
+    -- A KB-05 text step never types under a borrowed mode: the operator's own state is the context.
+    return nil, { code = "busy", message = "a temporary shortcut-mode change (" .. self._mode.id .. ", " .. self._mode.state .. ") is pending; text steps type only in the operator's own mode; wait for the restoration or recover", reason = "restoration", mode = self._mode.id, owner = self._mode.owner }
+  end
   local active, aerr = self:_readShortcutsActive()
   if st.context == "command-line" then
     -- Command-line text is admitted only while it can be verified: the command line must be readable
@@ -1373,6 +3165,32 @@ function Instance:_validateSequence(sessionId, steps)
   if #steps > self._config.maxSequenceSteps then return fail("bad-argument", "a sequence accepts at most " .. self._config.maxSequenceSteps .. " steps") end
   local out, estimate = {}, 0
   local pressed = {}
+  local heldQuickkeys = {}  -- Quickey tuples a press/combo step leaves down for later steps (chord capability)
+  local heldPcKeys = {}     -- PC-key tuples a press/combo step leaves down (KB-15: never next to a Quickey)
+  -- The instance's live key records by tuple (held, releasing, unresolved; text records own no key), as a
+  -- simulated state the steps update: a release step of a key this session holds removes it, so a later
+  -- step is judged against what will be down then. The runtime checks still catch a release that fails.
+  local liveByTuple = {}
+  for _, h in pairs(self._holds) do
+    if h.kind ~= "text" and (h.state == "held" or h.state == "releasing" or h.state == "unresolved") then liveByTuple[h.tupleKey] = h.quickkey and "quickkey" or "pckey" end
+  end
+  local function liveCount(kind)
+    local n = 0
+    for _, k in pairs(liveByTuple) do if k == kind then n = n + 1 end end
+    return n
+  end
+  -- KB-15: a step must not put a Quickey down next to a PC key or the reverse (live records or earlier steps).
+  local function mixFail(i, tuple, prefix)
+    local tkind = tuple.quickkey and "quickkey" or "pckey"
+    local other = tkind == "quickkey" and "pckey" or "quickkey"
+    local otherHeld = other == "quickkey" and heldQuickkeys or heldPcKeys
+    if liveCount(other) > 0 or next(otherHeld) ~= nil then
+      local _, e = fail("unqualified-mix", string.format("%s%s next to a %s that is down (a live record or an earlier step of this sequence) is not qualified (KB-15); release it first",
+        prefix or "", tkind == "quickkey" and ("Quickey " .. tostring(tuple.quickkey)) or ("PC key " .. tostring(tuple.pcKey)), other == "quickkey" and "Quickey" or "PC key"), { reason = "held", heldKind = other })
+      return e
+    end
+    return nil
+  end
   local unverifiableText = nil  -- index of a text-field text step: a later PLEASE/Enter must not commit it
   local function stepFail(i, code, message, extra)
     local _, e = fail(code, "step " .. i .. ": " .. tostring(message) .. " (nothing was dispatched)", extra)
@@ -1403,6 +3221,23 @@ function Instance:_validateSequence(sessionId, steps)
       if unverifiableText and commitsText(tuple, route) then
         return stepFail(i, "bad-argument", string.format("PLEASE/Enter after the text-field text of step %d would commit text that cannot be verified; check the field and commit it with a separate explicit call", unverifiableText))
       end
+      if tuple.quickkey then
+        local tk = tupleKey(tuple)
+        local others = liveCount("quickkey") > 0 or (next(heldQuickkeys) ~= nil and (count(heldQuickkeys) > 1 or not heldQuickkeys[tk]))
+        local cerr = self:_quickkeyCapabilityError(tuple, route, kind, false, others)
+        if cerr then return stepFail(i, cerr.code, cerr.message, { reason = cerr.reason, missing = cerr.missing, capabilities = cerr.capabilities }) end
+        if others then
+          -- Every key already down when this one goes down (live holds and earlier steps) must chord too.
+          cerr = self:_heldQuickkeyChordError(tk, heldQuickkeys, tuple)
+          if cerr then return stepFail(i, cerr.code, cerr.message, { reason = cerr.reason, missing = cerr.missing, capabilities = cerr.capabilities, heldKey = cerr.heldKey }) end
+        end
+        if kind == "press" then heldQuickkeys[tk] = { quickkey = tuple.quickkey, capabilities = route.capabilities } end
+      end
+      if tuple.pcKey or tuple.quickkey then
+        local merr = mixFail(i, tuple)
+        if merr then return stepFail(i, merr.code, merr.message, { reason = merr.reason, heldKind = merr.heldKind }) end
+        if kind == "press" and tuple.pcKey then heldPcKeys[tupleKey(tuple)] = true end
+      end
       if kind == "tap" then
         local holdMs = step.holdMs or 50
         if type(holdMs) ~= "number" or holdMs <= 0 or holdMs > self._config.maxTapMs then return stepFail(i, "bad-argument", "holdMs must be a number in (0, " .. self._config.maxTapMs .. "]") end
@@ -1420,7 +3255,7 @@ function Instance:_validateSequence(sessionId, steps)
       if #step.keys > self._config.maxComboKeys then return stepFail(i, "bad-argument", "combo accepts at most " .. self._config.maxComboKeys .. " keys") end
       if step.holdMs ~= nil and (type(step.holdMs) ~= "number" or step.holdMs <= 0 or step.holdMs > self._config.maxTapMs) then return stepFail(i, "bad-argument", "holdMs must be a number in (0, " .. self._config.maxTapMs .. "]") end
       s.specs, s.keyNames = {}, {}
-      local seen = {}
+      local seen, comboKind = {}, nil
       for k, ks in ipairs(step.keys) do
         if type(ks) ~= "table" then return stepFail(i, "bad-argument", "keys[" .. k .. "] must be a key spec table") end
         if ks.exclusive then return stepFail(i, "bad-argument", "key " .. k .. ": a combo cannot be exclusive") end
@@ -1435,6 +3270,23 @@ function Instance:_validateSequence(sessionId, steps)
         local tk = tupleKey(tuple)
         if seen[tk] then return stepFail(i, "bad-argument", "key " .. k .. " repeats tuple " .. tk) end
         seen[tk] = true
+        if tuple.pcKey or tuple.quickkey then
+          local tkind = tuple.quickkey and "quickkey" or "pckey"
+          if comboKind and comboKind ~= tkind then
+            return stepFail(i, "unqualified-mix", string.format("key %d: a combo cannot mix Quickeys and PC keys (KB-15)", k), { key = k, reason = "combo", heldKind = comboKind })
+          end
+          comboKind = tkind
+          local merr = mixFail(i, tuple, "key " .. k .. ": ")
+          if merr then return stepFail(i, merr.code, merr.message, { key = k, reason = merr.reason, heldKind = merr.heldKind }) end
+          if not step.holdMs and tuple.pcKey then heldPcKeys[tk] = true end
+        end
+        if tuple.quickkey then
+          local cerr = self:_quickkeyCapabilityError(tuple, route, step.holdMs and "tap" or "hold", true, true)
+          if cerr then return stepFail(i, cerr.code, "key " .. k .. ": " .. cerr.message, { key = k, reason = cerr.reason, missing = cerr.missing, capabilities = cerr.capabilities }) end
+          cerr = self:_heldQuickkeyChordError(tk, heldQuickkeys, tuple)
+          if cerr then return stepFail(i, cerr.code, "key " .. k .. ": " .. cerr.message, { key = k, reason = cerr.reason, missing = cerr.missing, capabilities = cerr.capabilities, heldKey = cerr.heldKey }) end
+          if not step.holdMs then heldQuickkeys[tk] = { quickkey = tuple.quickkey, capabilities = route.capabilities } end
+        end
         s.specs[k] = spec
         s.keyNames[k] = route.logical or tuple.pcKey
         pressed[tk] = i
@@ -1451,6 +3303,7 @@ function Instance:_validateSequence(sessionId, steps)
         local tk = tupleKey(tuple)
         local existing = self._byTuple[tk]
         known = pressed[tk] ~= nil or (existing ~= nil and existing.session == sessionId and existing.state == "held")
+        if existing ~= nil and existing.session == sessionId and existing.state == "held" then liveByTuple[tk] = nil end
         s.tupleKey, s.logical, s.pcKey = tk, route.logical, tuple.pcKey
       elseif type(spec.key) == "string" then
         known = pressed[spec.key:upper()] ~= nil
@@ -1459,6 +3312,7 @@ function Instance:_validateSequence(sessionId, steps)
         return stepFail(i, terr.code, terr.message)
       end
       if not known then return stepFail(i, "bad-argument", "release of a key that no earlier step of this sequence presses and this session does not hold") end
+      if s.tupleKey then heldQuickkeys[s.tupleKey] = nil; heldPcKeys[s.tupleKey] = nil end
       s.spec = spec
       estimate = estimate + 20
     elseif kind == "text" then
@@ -1499,6 +3353,12 @@ function Instance:_serviceSequence(job, now)
   while job.state == "running" and job.index <= #job.steps and guard <= #job.steps do
     guard = guard + 1
     local st, ev = job.steps[job.index], job.events[job.index]
+    if ev.state == "pending" and self._mode and self._mode.state == "active" and (st.kind == "text" or self:_stepWantsOtherMode(st)) then
+      -- KB-14: a step that needs the operator's own mode (a text step) or the opposite temporary mode
+      -- waits for the pending restoration instead of failing; the sequence deadline still bounds it.
+      ev.waitingFor = "restoration " .. self._mode.id
+      break
+    end
     if ev.state == "pending" then self:_startStep(job, st, ev, now) end
     if job.state ~= "running" then break end
     if ev.state == "waiting" then self:_pollStep(job, st, ev, now) end
@@ -1520,6 +3380,24 @@ function Instance:_serviceSequence(job, now)
   end
   if job.state == "running" and job.index > #job.steps then self:_completeSequence(job, now) end
   return self:_sequenceSummary(job, now)
+end
+
+-- Whether a press/tap/combo step would need the opposite shortcut mode of the active operation.
+function Instance:_stepWantsOtherMode(st)
+  local op = self._mode
+  if not op then return false end
+  local specs = st.specs or (st.spec and { st.spec }) or {}
+  for _, spec in ipairs(specs) do
+    if type(spec) == "table" and spec.key then
+      local r = self:_route(spec.key, { executor = spec.executor, prefer = spec.prefer })
+      local want
+      if r.modeChange then want = r.modeChange.target elseif r.effective == "text" then want = false end
+      -- KB-15: a Quickey is never pressed under a temporary mode change; the step waits for the restoration.
+      if r.effective == "quickkey" and r.tuple then return true end
+      if want ~= nil and want ~= op.target then return true end
+    end
+  end
+  return false
 end
 
 local function stepError(ev, err)
@@ -1551,6 +3429,20 @@ function Instance:_startStep(job, st, ev, now)
     if not h then stepError(ev, err); return end
     ev.hold, ev.pressOutcome, ev.tupleKey = h.id, h.pressOutcome, h.tupleKey
     self:_trackHold(job, h.id)
+    if h.kind == "text" then
+      -- KB-14: a text route completes within the press. Partial or uncertain delivery stops the sequence
+      -- (later steps unattempted; what went out is reported, never erased or replayed) so a following
+      -- PLEASE never commits text nobody saw.
+      ev.text = { typed = h.text and h.text.typed, chars = h.text and h.text.chars, outcome = h.text and h.text.outcome, readback = h.text and h.text.readback }
+      ev.releaseOutcome = "none"
+      if h.text and h.text.outcome ~= "typed" then
+        ev.state, ev.code = "uncertain", h.text.code or "text-partial"
+        ev.error = string.format("text route %s: %s", tostring(h.logical), tostring(h.text.error))
+      else
+        ev.state = "completed"
+      end
+      return
+    end
     if st.kind == "tap" then ev.state = "waiting" else ev.state = "completed"; ev.releaseOutcome = "pending" end
   elseif st.kind == "combo" then
     local r, err = self:combo(job.session, now, st.specs, { holdMs = st.holdMs, interaction = job.interaction, fromSequence = true })
@@ -1601,7 +3493,7 @@ function Instance:_pollStep(job, st, ev, now)
   for _, id in ipairs(ids) do
     local h = self._holds[id]
     if not h then outcomes[#outcomes + 1] = "forgotten"
-    elseif h.state == "released" then outcomes[#outcomes + 1] = h.dispatch.release and h.dispatch.release.outcome or "dispatched"
+    elseif h.state == "released" or h.state == "retained" then outcomes[#outcomes + 1] = h.dispatch.release and h.dispatch.release.outcome or "dispatched"
     elseif h.state == "unresolved" then
       ev.state, ev.error = "uncertain", "release of hold " .. id .. " unresolved: " .. tostring(h.unresolved and h.unresolved.reason)
       ev.releaseOutcome = "unresolved"
@@ -1744,7 +3636,8 @@ function Instance:_eventReport(ev, now)
               hold = ev.hold, holds = ev.holds, group = ev.group, holdMs = ev.holdMs, ms = ev.ms, context = ev.context,
               pressOutcome = ev.pressOutcome, releaseOutcome = ev.releaseOutcome, code = ev.code, error = ev.error, note = ev.note,
               chars = ev.chars, typed = ev.typed, uncertainChar = ev.uncertainChar, pressed = ev.pressed, rollback = ev.rollback,
-              readback = ev.readback, startedAt = ev.startedAt, finishedAt = ev.finishedAt }
+              readback = ev.readback, startedAt = ev.startedAt, finishedAt = ev.finishedAt,
+              text = ev.text, waitingFor = ev.waitingFor }  -- KB-14 text-route progress (typed, chars, outcome, readback); the restoration a step waits for
   if ev.chars then r.remaining = ev.chars - (ev.typed or 0) end
   if ev.state == "readback" then r.readback = { outcome = "pending", source = "CmdObj().cmdtext", expected = ev.expected } end
   -- A hold's aggregate readback (MASTATE) may conclude after the sequence finished: report the live one.
@@ -1815,9 +3708,13 @@ function Instance:service(now)
     if out.work >= budget then break end
     out.work = out.work + 1
     local r = self:_attemptRelease(h, now, h.deadlineReason or "deadline")
-    if h.state == "released" then out.released[#out.released + 1] = r else out.unresolved[#out.unresolved + 1] = r end
+    if h.state == "released" or h.state == "retained" then out.released[#out.released + 1] = r else out.unresolved[#out.unresolved + 1] = r end
   end
   out.pending = math.max(0, #due - out.work)
+  -- KB-14: text-route readbacks and the temporary shortcut mode (interference check, delayed restore).
+  self:_serviceTextReadbacks(now)
+  self:_serviceMode(now)
+  if self._mode then out.mode = { id = self._mode.id, state = self._mode.state } elseif self._lastMode and self._lastMode.restoredAt == now then out.mode = { id = self._lastMode.id, state = "restored", by = self._lastMode.restoredBy } end
   -- The running sequence advances after the deadlines, so a waiting tap sees its release first.
   if self._sequence and self._sequence.state == "running" then
     out.sequence = self:_serviceSequence(self._sequence, now)
@@ -1871,6 +3768,8 @@ function Instance:service(now)
       self._observed = { available = false, error = ok and "observe() returned no table" or tostring(obs), at = now }
     end
   end
+  -- Quickey bank freshness (KB-12): bounded, reads only the show identity.
+  if self._bank then out.bank = self:_serviceBank(now) end
   return out
 end
 
@@ -1880,10 +3779,12 @@ function Instance:status(now)
   local sessions = {}
   for id, s in pairs(self._sessions) do sessions[id] = self:_sessionReport(s, now) end
   local holds = {}
-  local unresolved = 0
+  local unresolved, retained, quarantined = 0, 0, 0
   for _, h in ipairs(self:_orderedHolds()) do
     holds[#holds + 1] = self:_holdReport(h, now)
-    if h.state == "unresolved" then unresolved = unresolved + 1 end
+    if h.state == "unresolved" then unresolved = unresolved + 1
+    elseif h.state == "retained" then retained = retained + 1
+    elseif h.state == "quarantined" then quarantined = quarantined + 1 end
   end
   local observedDown = {}
   if self._observed and self._observed.down then
@@ -1916,19 +3817,25 @@ function Instance:status(now)
         if h.state == "unresolved" then busy = { reason = "unresolved", owner = h.session, hold = h.id }; break end
       end
     end
+    if not busy and self._mode and self._mode.state == "unresolved" then busy = { reason = "restoration", owner = self._mode.owner, mode = self._mode.id } end
   end
   return {
     module = NAME, version = VERSION, apiVersion = API_VERSION,
     owner = self._owner, state = self._state,
     inputEnabled = self._inputEnabled and true or false,
     backend = { name = self._backend, attached = self._adapter ~= nil, dispatches = (self._adapter and self._adapter.dispatches) and true or false,
-                available = avail, missing = missing, description = bdef.description, limitations = bdef.limitations,
+                available = avail, missing = missing, description = bdef.description,
+                limitations = (self._adapter and type(self._adapter.limitations) == "table") and self._adapter.limitations or bdef.limitations,
                 displayScoped = false, perKeyObservation = self._observed and self._observed.available or false,
+                capabilities = adapterCapabilities(self._adapter),
                 counters = self._adapter and self._adapter.counters or nil },
+    routing = self:routingReport(),
+    bank = self:_bankSummary(now),
     capacity = { maxHolds = self._config.maxHolds, used = self:_liveCount() },
     config = shallowCopy(self._config),
     sessions = sessions, sessionCount = count(sessions),
-    holds = holds, holdCount = #holds, unresolved = unresolved,
+    holds = holds, holdCount = #holds, unresolved = unresolved, retained = retained, quarantined = quarantined,
+    modeChange = self:_modeReport(now), lastModeChange = (not self._mode and self._lastMode) and self:_modeReport(now, self._lastMode) or nil,
     exclusiveHold = ex and ex.id or nil,
     interactions = interactions, activeInteraction = active, busy = busy,
     sequence = self._sequence and self:_sequenceSummary(self._sequence, now) or nil,
@@ -1956,18 +3863,56 @@ function Instance:dispose(now)
   if self._state == "ready" and self._adapter and type(now) == "number" then
     result = self:_releaseHolds(self:_heldHolds(), now, "dispose")
   end
+  -- KB-14: the temporary mode follows the same rules as in service(): it is restored only when no
+  -- dependent record is still held/releasing/unresolved (a stuck key must keep the mode it was pressed in)
+  -- and the restore delay has elapsed since the last dependent event (the releases above may be that
+  -- event). Anything else is handed back as a record for adoptMode(): the consumer keeps it like an
+  -- unresolved key record, and recover() restores it once the keys are recovered.
+  local op = self._mode
+  if op and type(now) == "number" then
+    if op.state == "active" then
+      local live = 0
+      for _, h in ipairs(op.holds) do
+        if h.state == "held" or h.state == "releasing" or h.state == "unresolved" or h.state == "typing" then live = live + 1 end
+      end
+      local settleAt = op.lastEventAt + self._config.modeRestoreDelayMs / 1000
+      if live > 0 then
+        self:_modeUnresolved(op, now, string.format("%d dependent record(s) still held or unresolved at dispose; the mode is kept until they are recovered (restore pending)", live))
+        op.pending = "dependents"
+      elseif now < settleAt then
+        self:_modeUnresolved(op, now, string.format("disposed %d ms after the last dependent event, before the %d ms restore delay elapsed; restore pending", math.floor((now - op.lastEventAt) * 1000 + 0.5), self._config.modeRestoreDelayMs))
+        op.pending = "delay"
+      else
+        local profile = self:_readProfileName()
+        local active = self:_readShortcutsActive()
+        if profile ~= op.profile then self:_modeUnresolved(op, now, string.format("at dispose the active user profile was '%s' (operation ran in '%s'); not written", tostring(profile), op.profile))
+        elseif active == op.original then self:_modeResolved(op, now, "dispose", "the mode already read as the original state")
+        else self:_restoreMode(op, now, "dispose") end
+      end
+    end
+    if self._mode and self._mode.state == "unresolved" then
+      local m = self._mode
+      result.mode = { id = m.id, profile = m.profile, original = m.original, target = m.target, changedAt = m.changedAt, lastEventAt = m.lastEventAt, owner = m.owner, purpose = m.purpose, writes = m.writes, unresolved = m.unresolved, pending = m.pending }
+    end
+  end
   local records = {}
   for _, h in ipairs(self:_orderedHolds()) do
-    if h.state ~= "released" then
+    if h.state ~= "released" and h.state ~= "retained" and h.state ~= "quarantined" and h.kind ~= "text" then
       local rec = copyTuple(h)
       rec.logical, rec.route, rec.session, rec.pressedAt, rec.dispatch, rec.id = h.logical, h.route, h.session, h.pressedAt, h.dispatch, h.id
       rec.backend = h.backend or "unknown"
+      rec.target = h.target  -- KB-13: the executor a Quickey was pressed on; the only place it is ever released
       rec.exclusive = h.exclusive or nil
       rec.unresolved = h.unresolved or { reason = "instance disposed without a release attempt (no clock or adapter)", since = now }
       rec.tupleKey = h.tupleKey
       records[#records + 1] = rec
     end
   end
+  -- The bank record travels with the consumer (like unresolved records) so adoptBank() can verify and
+  -- reuse the objects after a restart; nothing on the console is touched by disposing.
+  result.bank = self:_bankRecord()
+  self._bank = nil
+  self._mode = nil
   self._state = "disposed"
   self._inputEnabled = false
   self._holds, self._byTuple, self._sessions = {}, {}, {}
@@ -2069,12 +4014,70 @@ function Instance:_planPress(sessionId, now, spec, ctx)
   ctx = ctx or {}
   local tuple, route, terr = self:_resolveSpec(spec, true)
   if not tuple then return nil, terr end
+  -- KB-14: an unresolved mode restoration blocks every new press, from everyone, until recover() verifies it.
+  local op = self._mode
+  if op and op.state == "unresolved" then
+    return fail("busy", "the keyboard-shortcut mode restoration is unresolved: " .. tostring(op.unresolved and op.unresolved.reason) .. "; verify the profile and mode and recover (owner recover, or the operator's \"input recover\") before new input",
+      { reason = "restoration", owner = op.owner, mode = op.id, original = op.original, target = op.target, profile = op.profile })
+  end
+  if route.modeChange or route.source == "text" then
+    if not (self._adapter and type(self._deps.setShortcutsActive) == "function") and route.modeChange then
+      return fail("unavailable", "the route needs a temporary shortcut-mode change but deps.setShortcutsActive is missing; nothing is toggled", { unavailable = { NEED_MODE } })
+    end
+    -- One mode operation at a time, in one direction: a route that needs the opposite state waits for the
+    -- restoration (it is reported, never pre-empted).
+    local want
+    if route.modeChange then want = route.modeChange.target else want = route.shortcutsActive end
+    if op and op.state == "active" and want ~= nil and op.target ~= want then
+      return fail("mode-conflict", string.format("a temporary shortcut-mode change is active (mode %s: shortcuts %s for %s, session '%s'); this route needs them %s; wait for the restoration (%d ms after its last event) or release its holds",
+        op.id, op.target and "on" or "off", tostring(op.purpose), tostring(op.owner), want and "on" or "off", self._config.modeRestoreDelayMs), { mode = op.id, owner = op.owner, target = op.target })
+    end
+  end
+  if route.source == "text" then
+    if ctx.comboIndex ~= nil then return fail("unsupported", "a text route cannot be part of a combo: text is inserted once and holds nothing, so it has no chord semantics (nothing dispatched)") end
+    if spec.exclusive then return fail("unsupported", "a text route cannot be exclusive: it inserts text once and holds nothing") end
+    -- Text refuses every instance-owned record (held, releasing, unresolved, retained, quarantined) of
+    -- any session: characters typed next to a held key or a stuck key land in an unknown context.
+    for _, h in pairs(self._holds) do
+      -- A retained text record of the same (still active) operation is not a conflict: consecutive text
+      -- routes share one mode change and one restoration.
+      local sameOpText = h.state == "retained" and h.kind == "text" and op and op.state == "active" and h.modeOp == op.id
+      if h.state ~= "released" and not sameOpText then
+        return fail("conflict", string.format("text route %s refused: %s (hold %s, session '%s') is %s; text is inserted only while this instance owns no other record (release, wait for the restoration or recover first)",
+          route.logical, tostring(h.logical or h.tupleKey), h.id, h.session, h.state), { hold = h.id, owner = h.session, state = h.state })
+      end
+    end
+    local ex = self:_exclusiveHold()
+    if ex then return fail("exclusive-hold", "an exclusive long-press is live; no text is inserted", { hold = ex.id, owner = ex.session }) end
+    local mismatchT = self:_checkRoutes()
+    if mismatchT then return fail("route-changed", "a held key's route changed; no text is inserted until it is resolved", { mismatches = mismatchT }) end
+  end
   -- A route change during an existing hold stops every new interaction event until it is resolved.
   local mismatch = self:_checkRoutes()
   if mismatch then
     local m = mismatch[1]
     return fail("route-changed", string.format("a held key's route changed since it was pressed: %s %s (hold %s, session '%s', original %s); release or recover before new input (the operator restores the route; nothing is toggled here)",
       tostring(m.logical), tostring(m.mismatch), tostring(m.hold), tostring(self._holds[m.hold] and self._holds[m.hold].session), tostring(m.original.tupleKey)), { mismatches = mismatch })
+  end
+  -- KB-15: Quickeys (executor presses) and PC keys (Keyboard()) never down at once, no Quickey under a
+  -- temporary shortcut-mode change. Refused before any admission or dispatch, on every backend.
+  if tuple.pcKey or tuple.quickkey then
+    local merr = self:_mixError(tuple, ctx)
+    if merr then return nil, merr end
+  end
+  -- Quickey capability flags (KB-11): the requested operation must be one the adapter advertises. A tap
+  -- needs tap, a hold needs hold, and pressing while another Quickey record is live (a combo, or a
+  -- second press alongside a held one) needs chord. Checked before any admission or dispatch.
+  if tuple.quickkey then
+    local simultaneous = self:_liveQuickkeyCount(tupleKey(tuple)) > 0
+    local cerr = self:_quickkeyCapabilityError(tuple, route, ctx.kind, ctx.comboIndex ~= nil, simultaneous)
+    if cerr then return nil, cerr end
+    -- A chord needs the flag on EVERY participating key: a held Quickey without chord evidence must not
+    -- get a neighbour either (the hold's own stored flags decide, never the current policy).
+    if simultaneous then
+      cerr = self:_heldQuickkeyChordError(tupleKey(tuple), nil, tuple)
+      if cerr then return nil, cerr end
+    end
   end
   -- An exclusive hold (intended long-press) admits no new press from anyone, the owner included: a
   -- second key or a duplicate press cancels the console's long-press (KB-01).
@@ -2115,7 +4118,8 @@ function Instance:_planPress(sessionId, now, spec, ctx)
   if busy and busy.reason == "unresolved" and busy.owner ~= sessionId and self._config.requireInteraction then
     return fail("busy", busy.description, busy)
   end
-  if ctx.kind == "hold" and not ia and self._config.requireInteraction then
+  if ctx.kind == "hold" and not ia and self._config.requireInteraction and route.source ~= "text" then
+    -- A text route holds nothing (it completes within the press), so it needs no interaction.
     return fail("interaction-required", "a standalone hold needs an explicit interaction: begin one (leased) and pass its id, or use a bounded tap, chord tap or sequence", { kind = ctx.kind })
   end
   local tk = tupleKey(tuple)
@@ -2148,10 +4152,12 @@ function Instance:_planPress(sessionId, now, spec, ctx)
     return fail("bad-argument", "maxHoldMs must be a number in (0, " .. self._config.maxHoldMs .. "]")
   end
   -- Backend preflight (Keyboard() present, key name valid, display exists, MASTATE readable for MA).
-  if type(self._adapter.preflight) == "function" then
-    local ok, accepted, reason = pcall(self._adapter.preflight, self._adapter, copyTuple(tuple), route)
+  if type(self._adapter.preflight) == "function" and (tuple.pcKey or tuple.quickkey) then
+    -- The operation context lets a backend check per-press requirements (KB-13: one free reserved
+    -- executor per key of a combo). detail is the backend's structured reason when it has one.
+    local ok, accepted, reason, detail = pcall(self._adapter.preflight, self._adapter, copyTuple(tuple), route, { kind = ctx.kind, combo = ctx.comboIndex ~= nil, extra = ctx.extra or 0 })
     if not ok then return fail("unsupported", "backend preflight failed: " .. tostring(accepted)) end
-    if not accepted then return fail("unsupported", "backend refuses " .. tk .. ": " .. tostring(reason)) end
+    if not accepted then return fail("unsupported", "backend refuses " .. tk .. ": " .. tostring(reason), { reason = type(detail) == "table" and detail.code or "backend", detail = type(detail) == "table" and detail or nil }) end
   end
   return { tuple = tuple, route = route, tupleKey = tk, maxHoldMs = maxHoldMs, exclusive = spec.exclusive and true or false, interaction = ia and ia.id or nil }
 end
@@ -2161,24 +4167,381 @@ end
 --   raised              -> delivery unknown, the record stays as unresolved (blocks the tuple, recover() releases)
 --   ok                  -> held; confirmed is what the backend could observe (nil = not observable)
 function Instance:_dispatchPress(s, plan, now)
+  if plan.route and plan.route.source == "text" then return self:_dispatchText(s, plan, now) end
   local hold = self:_newHold(s, plan.tuple, plan.route, now, now + plan.maxHoldMs / 1000, "max-hold")
   hold.exclusive = plan.exclusive
   hold.interaction = plan.interaction
-  local ok, aOk, confirmed, err = pcall(self._adapter.press, self._adapter, copyTuple(plan.tuple))
+  -- KB-14: the mode the route needs is entered (or joined) before the key goes down and kept until the
+  -- hold is released; a failed mode change dispatches nothing.
+  if plan.route and plan.route.modeChange then
+    local op, merr = self:_enterMode(plan.route.modeChange.target, now, s.id, "shortcut hold " .. tostring(hold.logical), hold)
+    if not op then self:_dropHold(hold); return nil, merr end
+  elseif self._mode and self._mode.state == "active" and plan.route and plan.route.source == "shortcut-table" and self._mode.target == true then
+    -- A shortcut-table hold that found shortcuts on because a mode operation enabled them depends on it.
+    self:_modeAttach(self._mode, hold)
+  end
+  self._now = now
+  local ok, aOk, confirmed, err, target = pcall(self._adapter.press, self._adapter, copyTuple(plan.tuple))
+  if hold.modeOp then self:_modeEvent(now) end
   if not ok then
-    hold.dispatch.press = { ok = false, at = now, error = tostring(aOk) }
-    self:_markUnresolved(hold, now, "press raised an error; whether the key went down is unknown: " .. tostring(aOk))
-    return nil, { code = "press-failed", message = "press raised an error: " .. tostring(aOk), hold = hold.id, unresolved = true }
+    -- A backend that raises may raise { message, target } so the record keeps the target it was
+    -- dispatched on (KB-13: the executor) and recovery can release through it.
+    local msg = aOk
+    if type(aOk) == "table" then msg = aOk.message; if type(aOk.target) == "table" then hold.target = aOk.target end end
+    hold.dispatch.press = { ok = false, at = now, error = tostring(msg) }
+    self:_markUnresolved(hold, now, "press raised an error; whether the key went down is unknown: " .. tostring(msg))
+    return nil, { code = "press-failed", message = "press raised an error: " .. tostring(msg), hold = hold.id, unresolved = true, target = hold.target }
   end
   if aOk == false then
     hold.dispatch.press = { ok = false, at = now, error = tostring(err or confirmed) }
     self:_dropHold(hold)
     return nil, { code = "press-failed", message = "press was refused by the backend: " .. tostring(err or confirmed) }
   end
-  hold.dispatch.press = { ok = true, confirmed = confirmed, at = now, outcome = confirmed == true and "confirmed" or "dispatched" }
+  if type(target) == "table" then hold.target = target end
+  hold.dispatch.press = { ok = true, confirmed = confirmed, at = now, outcome = confirmed == true and "confirmed" or "dispatched", target = hold.target }
   self:_scheduleReadback(hold, "press", true, now)
   self._pressCount = self._pressCount + 1
   return hold
+end
+
+-- KB-14: temporary shortcut-mode operations ---------------------------------------------------
+--
+-- One operation at a time: { id, profile, original, target, changedAt, lastEventAt, owner, purpose,
+-- holds = { <hold>... }, state = "active" | "restored" | "unresolved", writes }. The write goes through
+-- deps.setShortcutsActive and is verified by reading the state back; the restore happens in service()
+-- once no dependent record is held/releasing/unresolved and modeRestoreDelayMs passed since the last
+-- dependent event. Interference (profile changed, state unreadable) stops the operation: it becomes an
+-- unresolved restoration that blocks all new input until recover() re-reads and restores it.
+
+function Instance:_readProfileName()
+  local d = self._deps
+  if type(d.profileName) ~= "function" then return nil, "deps.profileName missing" end
+  local ok, v = pcall(d.profileName)
+  if not ok then return nil, tostring(v) end
+  if v == nil then return nil, "the console returned no profile name" end
+  return tostring(v)
+end
+
+function Instance:_modeAttach(op, hold)
+  if hold.modeOp == op.id then return end
+  hold.modeOp = op.id
+  op.holds[#op.holds + 1] = hold
+end
+
+-- Every dependent key event moves the restore window, while the operation is active and while its
+-- restoration is unresolved (a dependent released during recover() is still the last key event).
+function Instance:_modeEvent(now)
+  local op = self._mode
+  if op and (op.state == "active" or op.state == "unresolved") then op.lastEventAt = now end
+end
+
+function Instance:_modeUnresolved(op, now, reason)
+  op.state = "unresolved"
+  op.unresolved = { reason = reason, since = op.unresolved and op.unresolved.since or now, lastAttempt = now }
+  for _, h in ipairs(op.holds) do
+    if h.state == "retained" then h.state = "quarantined"; h.quarantine = { reason = reason, since = now } end
+  end
+end
+
+function Instance:_modeResolved(op, now, by, note)
+  op.state = "restored"
+  op.restoredAt, op.restoredBy, op.restoreNote = now, by, note
+  op.unresolved = nil
+  for _, h in ipairs(op.holds) do
+    if h.state == "retained" or h.state == "quarantined" then
+      h.state = "released"
+      h.quarantine = nil
+      h.restoration = { by = by, at = now }
+      self._released[#self._released + 1] = h
+      while #self._released > 32 do
+        local old = table.remove(self._released, 1)
+        if self._holds[old.id] == old then self._holds[old.id] = nil end
+      end
+      self:_maybeForgetSession(h.session)
+    end
+  end
+  self._lastMode = op
+  self._mode = nil
+end
+
+-- Captures the state, writes the target when it differs and verifies it. Returns the operation (joined
+-- or created) or nil, err. A write whose effect cannot be read back leaves an unresolved restoration.
+function Instance:_enterMode(target, now, sessionId, purpose, hold)
+  local op = self._mode
+  if op and op.state == "unresolved" then
+    return fail("busy", "the keyboard-shortcut mode restoration is unresolved: " .. tostring(op.unresolved and op.unresolved.reason) .. "; recover before new input", { reason = "restoration", mode = op.id, owner = op.owner })
+  end
+  -- KB-15: the shortcut mode is never changed while a Quickey may be down (disabling shortcuts drops a
+  -- Keyboard()-held MA, KB-14; what it does to an executor-held Quickey is not qualified).
+  local live = self:_liveKinds()
+  if live.quickkey > 0 then
+    local h = live.first.quickkey
+    return fail("unqualified-mix", string.format("the route needs a temporary shortcut-mode change but Quickey %s (hold %s, session '%s') is %s; changing the shortcut mode while a Quickey is down is not qualified (KB-15): the mode is not changed and nothing is dispatched; release or recover it first",
+      tostring(h.quickkey), h.id, h.session, h.state), { reason = "held", hold = h.id, owner = h.session, state = h.state, heldKind = "quickkey" })
+  end
+  if op and op.state == "active" then
+    if op.target ~= target then return fail("mode-conflict", "a temporary shortcut-mode change in the other direction is active (mode " .. op.id .. ")", { mode = op.id, owner = op.owner, target = op.target }) end
+    if hold then self:_modeAttach(op, hold) end
+    return op
+  end
+  if type(self._deps.setShortcutsActive) ~= "function" then
+    return fail("unavailable", "the route needs a temporary shortcut-mode change but deps.setShortcutsActive is missing; nothing is toggled", { unavailable = { NEED_MODE } })
+  end
+  local active, aerr = self:_readShortcutsActive()
+  if active == nil then return fail("unreadable", "shortcut enablement cannot be established (" .. tostring(aerr) .. "); the mode is not changed and nothing is dispatched") end
+  local profile, perr = self:_readProfileName()
+  if profile == nil then return fail("unreadable", "the active user profile cannot be read (" .. tostring(perr) .. "); the mode is not changed and nothing is dispatched") end
+  if active == target then
+    -- The state changed between resolution and dispatch: the decision is stale. A new call decides again.
+    return fail("route-changed", string.format("keyboard shortcuts read %s at resolution but %s now; nothing dispatched, make a new call", tostring(not target), tostring(active)))
+  end
+  self._modeSeq = (self._modeSeq or 0) + 1
+  op = { id = string.format("m%d", self._modeSeq), profile = profile, original = active, target = target, changedAt = now, lastEventAt = now,
+         owner = sessionId, purpose = purpose, holds = {}, state = "active", writes = 1 }
+  local okW, werr = pcall(self._deps.setShortcutsActive, target)
+  if not okW then
+    self._mode = op
+    self:_modeUnresolved(op, now, "the shortcut-mode write raised: " .. tostring(werr) .. "; whether the mode changed is unknown")
+    return fail("mode-change-failed", "the shortcut-mode write raised: " .. tostring(werr) .. "; nothing dispatched and the restoration is unresolved (recover)", { mode = op.id, restoration = "unresolved" })
+  end
+  local after, aerr2 = self:_readShortcutsActive()
+  if after == target then
+    self._mode = op
+    if hold then self:_modeAttach(op, hold) end
+    return op
+  end
+  if after == active then
+    -- No effect, nothing to restore.
+    return fail("mode-change-failed", string.format("the console did not apply the shortcut-mode change (wrote %s, reads back %s); nothing dispatched", tostring(target), tostring(after)))
+  end
+  self._mode = op
+  self:_modeUnresolved(op, now, "the shortcut mode cannot be read back after the write (" .. tostring(aerr2) .. "); whether it changed is unknown")
+  return fail("mode-change-failed", "the shortcut mode cannot be read back after the write (" .. tostring(aerr2) .. "); nothing dispatched and the restoration is unresolved (recover)", { mode = op.id, restoration = "unresolved" })
+end
+
+-- Writes the original state back and verifies it. true when restored.
+function Instance:_restoreMode(op, now, by)
+  op.writes = (op.writes or 0) + 1
+  op.restoreAttempts = (op.restoreAttempts or 0) + 1
+  local okW, werr = pcall(self._deps.setShortcutsActive, op.original)
+  if not okW then self:_modeUnresolved(op, now, "the restore write raised: " .. tostring(werr) .. "; the mode may still be " .. tostring(op.target)); return false end
+  local after, aerr = self:_readShortcutsActive()
+  if after == op.original then self:_modeResolved(op, now, by); return true end
+  self:_modeUnresolved(op, now, string.format("the restore did not take effect (wrote %s, reads back %s%s)", tostring(op.original), tostring(after), after == nil and (": " .. tostring(aerr)) or ""))
+  return false
+end
+
+-- Checks interference and restores when due. Called from service().
+function Instance:_serviceMode(now)
+  local op = self._mode
+  if not op or op.state ~= "active" then return end
+  local profile, perr = self:_readProfileName()
+  if profile == nil then self:_modeUnresolved(op, now, "the active user profile cannot be read (" .. tostring(perr) .. "); the mode is not restored blindly"); return end
+  if profile ~= op.profile then
+    self:_modeUnresolved(op, now, string.format("the active user profile is now '%s' (was '%s'); the replacement profile is not written, restore the profile and recover", profile, op.profile))
+    return
+  end
+  local active, aerr = self:_readShortcutsActive()
+  if active == nil then self:_modeUnresolved(op, now, "shortcut enablement cannot be read (" .. tostring(aerr) .. "); the mode is not restored blindly"); return end
+  if active ~= op.target then
+    -- Somebody set the mode back (F10, another plugin, another user): the operator's newer state wins.
+    op.interference = { at = now, observed = active, note = "the mode was changed back by someone else while the operation was active" }
+    self:_modeResolved(op, now, "operator", "the mode already read as the original state; nothing was written")
+    return
+  end
+  for _, h in ipairs(op.holds) do
+    if h.state == "held" or h.state == "releasing" or h.state == "unresolved" or h.state == "typing" then return end
+  end
+  if now < op.lastEventAt + self._config.modeRestoreDelayMs / 1000 then return end
+  self:_restoreMode(op, now, "service")
+end
+
+-- recover(): an unresolved restoration is re-read; the original profile and a state that still reads as
+-- ours are the conditions for writing the original back. A replacement profile is never touched.
+function Instance:_recoverMode(now)
+  local op = self._mode
+  if not op or op.state ~= "unresolved" then return nil end
+  op.unresolved.lastAttempt = now
+  local profile, perr = self:_readProfileName()
+  if profile == nil then op.unresolved.reason = "the active user profile cannot be read (" .. tostring(perr) .. ")"; return self:_modeReport(now) end
+  if profile ~= op.profile then
+    op.unresolved.reason = string.format("the active user profile is '%s', the operation ran in '%s'; the replacement profile is not written (switch back and recover)", profile, op.profile)
+    return self:_modeReport(now)
+  end
+  local active, aerr = self:_readShortcutsActive()
+  if active == nil then op.unresolved.reason = "shortcut enablement cannot be read (" .. tostring(aerr) .. ")"; return self:_modeReport(now) end
+  if active == op.original then self:_modeResolved(op, now, "recover", "the mode already read as the original state; nothing was written"); return self:_modeReport(now, self._lastMode) end
+  -- An adopted restoration lost its dependency list with the previous instance: every record the
+  -- instance still owns (adopted stuck keys included) stands in for it, so a key that was pressed in the
+  -- temporary mode is recovered before the mode is written back.
+  if op.adopted and self:_liveCount() > 0 then
+    op.unresolved.reason = string.format("%d record(s) are still held or unresolved; the mode is kept until they are recovered (restore pending)", self:_liveCount())
+    op.pending = "dependents"
+    return self:_modeReport(now)
+  end
+  -- Inside the restore window after the last dependent event (a release this very call): the operation
+  -- is valid again and goes back to "active" so service() restores it once the delay elapsed; a restore
+  -- in the call that released a key is exactly what the timing probe ruled out.
+  if now < op.lastEventAt + self._config.modeRestoreDelayMs / 1000 then
+    op.state, op.unresolved, op.pending = "active", nil, "delay"
+    op.revalidated = { at = now, note = "profile and state re-read as expected; the restore waits for the delay after the last dependent event" }
+    for _, hh in ipairs(op.holds) do if hh.state == "quarantined" then hh.state = "retained"; hh.quarantine = nil end end
+    return self:_modeReport(now)
+  end
+  -- Still our temporary state on our profile. A dependent that is still held keeps the operation going
+  -- (restoring under a held key is the mode change the hold must not see); otherwise restore now.
+  for _, h in ipairs(op.holds) do
+    if h.state == "held" or h.state == "releasing" or h.state == "unresolved" or h.state == "typing" then
+      op.state, op.unresolved, op.lastEventAt = "active", nil, now
+      op.revalidated = { at = now, note = "profile and state re-read as expected; the restore waits for the dependent records" }
+      for _, hh in ipairs(op.holds) do if hh.state == "quarantined" then hh.state = "retained"; hh.quarantine = nil end end
+      return self:_modeReport(now)
+    end
+  end
+  self:_restoreMode(op, now, "recover")
+  return self:_modeReport(now, self._mode or self._lastMode)
+end
+
+function Instance:_modeReport(now, op)
+  op = op or self._mode
+  if not op then return nil end
+  local deps = {}
+  for _, h in ipairs(op.holds) do deps[#deps + 1] = { hold = h.id, state = h.state, logical = h.logical } end
+  return { id = op.id, state = op.state, profile = op.profile, original = op.original, target = op.target, owner = op.owner, purpose = op.purpose,
+           changedAt = op.changedAt, lastEventAt = op.lastEventAt, restoredAt = op.restoredAt, restoredBy = op.restoredBy, restoreNote = op.restoreNote,
+           writes = op.writes, restoreAttempts = op.restoreAttempts, unresolved = op.unresolved, interference = op.interference, adopted = op.adopted, revalidated = op.revalidated, pending = op.pending,
+           dependents = deps, restoreDelayMs = self._config.modeRestoreDelayMs,
+           restoreInMs = (op.state == "active" and now) and math.max(0, math.floor((op.lastEventAt + self._config.modeRestoreDelayMs / 1000 - now) * 1000 + 0.5)) or nil,
+           note = "a temporary keyboard-shortcut mode change (KB-14): captured profile and state, restored by service() after the last dependent event; unresolved = the operator's profile/mode changed or could not be read, recover() re-reads and restores (never a replacement profile)" }
+end
+
+-- Imports an unresolved restoration record handed out by a previous instance's dispose(). Nothing is written.
+function Instance:adoptMode(record, now)
+  checkReady(self, "adoptMode")
+  checkNow(now, "adoptMode")
+  if type(record) ~= "table" or type(record.profile) ~= "string" or type(record.original) ~= "boolean" or type(record.target) ~= "boolean" then
+    return fail("bad-record", "adoptMode needs { profile, original, target } from a previous dispose()")
+  end
+  if self._mode then return fail("mode-exists", "a mode operation already exists (" .. self._mode.id .. ")") end
+  self._modeSeq = (self._modeSeq or 0) + 1
+  self._mode = { id = string.format("m%d", self._modeSeq), profile = record.profile, original = record.original, target = record.target, changedAt = record.changedAt or now,
+                 lastEventAt = type(record.lastEventAt) == "number" and record.lastEventAt or now, owner = "previous-run", purpose = record.purpose, holds = {}, state = "unresolved", writes = record.writes or 0, adopted = true, pending = record.pending,
+                 unresolved = { reason = "adopted from a previous run: " .. tostring(record.unresolved and record.unresolved.reason), since = now } }
+  return self:_modeReport(now)
+end
+
+-- KB-14 text route: inserts the key's text once, chunked, with the mode and the profile rechecked between
+-- chunks. The record owns no key: it is "released" at once when no mode operation was needed, otherwise
+-- "retained" until service() restores the mode. Nothing is replayed; partial progress is reported.
+function Instance:_dispatchText(s, plan, now)
+  local route = plan.route
+  local hold = self:_newHold(s, plan.tuple, route, now, nil, nil)
+  hold.kind = "text"
+  hold.state = "typing"
+  hold.interaction = plan.interaction
+  hold.text = { text = route.text, chars = route.textChars, typed = 0, focus = route.focus }
+  if route.modeChange then
+    local op, merr = self:_enterMode(route.modeChange.target, now, s.id, "text route " .. tostring(hold.logical), hold)
+    if not op then self:_dropHold(hold); return nil, merr end
+  elseif self._mode and self._mode.state == "active" and self._mode.target == false then
+    self:_modeAttach(self._mode, hold)
+  end
+  if type(self._adapter.char) ~= "function" then
+    self:_dropHold(hold)
+    return fail("press-failed", "the backend has no char(): nothing inserted", { unavailable = { NEED_CHAR } })
+  end
+  local before = self:_readCommandText()
+  hold.text.before = before
+  local expectActive = route.shortcutsActive
+  local function recheck()
+    local active, aerr = self:_readShortcutsActive()
+    if active ~= expectActive then return string.format("keyboard shortcuts read %s (expected %s%s)", tostring(active), tostring(expectActive), active == nil and (": " .. tostring(aerr)) or "") end
+    if route.profile ~= nil then
+      local pn = self:_readProfileName()
+      if pn ~= route.profile then return string.format("the active user profile is now '%s' (was '%s')", tostring(pn), route.profile) end
+    end
+    if self:_exclusiveHold() then return "an exclusive long-press appeared" end
+    if self:_checkRoutes() then return "a held key's route changed" end
+    return nil
+  end
+  self._now = now
+  local outcome, code, errText
+  while hold.text.typed < hold.text.chars do
+    local why = recheck()
+    if why then
+      outcome, code = hold.text.typed > 0 and "partial" or "failed", "context-changed"
+      errText = string.format("context changed after %d of %d characters: %s; typing stopped (nothing erased or replayed)", hold.text.typed, hold.text.chars, why)
+      break
+    end
+    for _ = 1, self._config.textCharsPerService do
+      if hold.text.typed >= hold.text.chars then break end
+      local cp = route.codepoints[hold.text.typed + 1]
+      local ok, aOk, _, cerr = pcall(self._adapter.char, self._adapter, cp, hold.display)
+      if not ok then
+        outcome, code = "uncertain", "char-raised"
+        errText = string.format("character %d of %d (U+%04X) raised: %s; whether it was delivered is unknown, typing stopped", hold.text.typed + 1, hold.text.chars, cp, tostring(aOk))
+        hold.text.uncertainChar = hold.text.typed + 1
+        break
+      end
+      if aOk == false then
+        outcome, code = hold.text.typed > 0 and "partial" or "failed", "char-refused"
+        errText = string.format("character %d of %d (U+%04X) refused before dispatch: %s; typing stopped", hold.text.typed + 1, hold.text.chars, cp, tostring(cerr))
+        break
+      end
+      hold.text.typed = hold.text.typed + 1
+    end
+    if outcome then break end
+  end
+  self:_modeEvent(now)
+  if not outcome then outcome = "typed" end
+  hold.text.outcome, hold.text.code, hold.text.error = outcome, code, errText
+  if outcome == "failed" then
+    -- Nothing went out; the record is dropped (a mode operation created for it restores on its own).
+    self:_dropHold(hold)
+    return fail("press-failed", "text route " .. tostring(hold.logical) .. ": " .. tostring(errText), { reason = code, typed = 0, chars = hold.text.chars })
+  end
+  self._pressCount = self._pressCount + 1
+  hold.dispatch.press = { ok = true, at = now, outcome = outcome == "typed" and "dispatched" or outcome, typed = hold.text.typed, chars = hold.text.chars, error = errText }
+  hold.releasedAt = now
+  hold.text.typedText = (function()
+    local parts = {}
+    for i = 1, hold.text.typed do parts[#parts + 1] = utf8.char(route.codepoints[i]) end
+    return table.concat(parts)
+  end)()
+  if before ~= nil then
+    hold.text.readback = { outcome = "pending", source = "CmdObj().cmdtext", before = before, expected = before .. hold.text.typedText, since = now, until_ = now + self._config.readbackMs / 1000 }
+  else
+    hold.text.readback = { outcome = "unavailable", reason = "the command line is not readable; where the characters landed cannot be verified from Lua" }
+  end
+  if hold.modeOp then
+    hold.state = "retained"
+  else
+    hold.state = "released"
+    self._released[#self._released + 1] = hold
+    while #self._released > 32 do
+      local old = table.remove(self._released, 1)
+      if self._holds[old.id] == old then self._holds[old.id] = nil end
+    end
+  end
+  if self._byTuple[hold.tupleKey] == hold then self._byTuple[hold.tupleKey] = nil end
+  return hold
+end
+
+-- Bounded command-line readback of text routes, serviced like the MASTATE readback.
+function Instance:_serviceTextReadbacks(now)
+  for _, h in pairs(self._holds) do
+    local rb = h.text and h.text.readback
+    if rb and rb.outcome == "pending" then
+      local actual, rerr = self:_readCommandText()
+      if actual ~= nil and actual == rb.expected then
+        rb.outcome, rb.actual, rb.at = "observed", actual, now
+        rb.note = "the command line shows the inserted text; not executed"
+      elseif now >= rb.until_ then
+        rb.outcome, rb.actual, rb.at = "inconclusive", actual, now
+        rb.reason = actual == nil and ("command line not readable: " .. tostring(rerr)) or string.format("the command line did not show the expected text within %d ms (the characters may have gone to a focused text field, or the line was edited meanwhile; neither success nor failure is established)", self._config.readbackMs)
+      end
+    end
+  end
 end
 
 -- Bounded aggregate readback for routes verified through MASTATE: service() watches the backend's
@@ -2198,11 +4561,128 @@ end
 
 -- An exclusive record keeps the interaction lock until its release is RESOLVED: a refused or raised
 -- release leaves the key possibly down, so the long-press is still in effect for everyone.
+-- The requested Quickey operation against the adapter's flags: a tap needs tap, a hold needs hold, and a
+-- combo or a press next to another live Quickey needs chord. Returns the structured error or nil.
+-- Used by _planPress (every dispatch path) and by the sequence preflight (before the first event).
+function Instance:_quickkeyCapabilityError(tuple, route, kind, combo, simultaneous)
+  local caps = route and route.capabilities or {}
+  local need = kind == "tap" and "tap" or "hold"
+  local missing = {}
+  if not caps[need] then missing[#missing + 1] = need end
+  if (combo or simultaneous) and not caps.chord then missing[#missing + 1] = "chord" end
+  if #missing == 0 then return nil end
+  local _, e = fail("unsupported", string.format("Quickey %s: the backend does not advertise %s for Quickeys (capabilities.quickkey = { tap = %s, hold = %s, chord = %s }); %s is refused before dispatch, nothing is substituted",
+      tostring(tuple.quickkey), table.concat(missing, " and "), tostring(caps.tap or false), tostring(caps.hold or false), tostring(caps.chord or false),
+      combo and "the combo" or (kind == "tap" and "the tap" or "the hold")),
+    { reason = "capability", missing = missing, capabilities = caps, kind = kind, combo = combo and true or false })
+  return e
+end
+
+-- A chord is only as qualified as its least qualified key: every Quickey already down when another one
+-- goes down must carry the chord flag it was pressed with (stored on its route; the current policy or
+-- adapter never changes that). Checks the live records (held, releasing, unresolved) and, for the sequence
+-- validator, the tuples earlier steps leave down (extraHeld: tupleKey -> { quickkey, capabilities }).
+-- Returns the structured error for the first held key without chord, or nil.
+function Instance:_heldQuickkeyChordError(exceptTupleKey, extraHeld, incoming)
+  local function errorFor(name, caps, state)
+    local _, e = fail("unsupported", string.format("Quickey %s is %s and does not advertise chord (capabilities.quickkey = { tap = %s, hold = %s, chord = %s }); pressing %s next to it is refused before dispatch, nothing is substituted",
+        tostring(name), state, tostring(caps.tap or false), tostring(caps.hold or false), tostring(caps.chord or false), tostring(incoming and incoming.quickkey or "another Quickey")),
+      { reason = "capability", missing = { "chord" }, capabilities = caps, heldKey = name, kind = "hold" })
+    return e
+  end
+  for _, h in pairs(self._holds) do
+    if h.quickkey and h.state ~= "released" and h.tupleKey ~= exceptTupleKey then
+      local caps = h.route and h.route.capabilities or {}
+      if not caps.chord then return errorFor(h.quickkey, caps, h.state == "held" and "held" or h.state) end
+    end
+  end
+  for tk, held in pairs(extraHeld or {}) do
+    if tk ~= exceptTupleKey and type(held) == "table" then
+      local caps = held.capabilities or {}
+      if not caps.chord then return errorFor(held.quickkey, caps, "left down by an earlier step") end
+    end
+  end
+  return nil
+end
+
+-- Quickey records that may still be down (held, releasing or unresolved): a new Quickey press next to
+-- one is a simultaneous press and needs the chord capability.
+function Instance:_liveQuickkeyCount(exceptTupleKey)
+  local n = 0
+  for _, h in pairs(self._holds) do
+    if h.quickkey and h.state ~= "released" and h.tupleKey ~= exceptTupleKey then n = n + 1 end
+  end
+  return n
+end
+
+-- KB-15: how many key records of each kind may still be down (held, releasing or unresolved; text
+-- records own no key), with the first record of each kind for reporting.
+local function tupleKind(tk) return (type(tk) == "string" and tk:sub(1, 9) == "quickkey:") and "quickkey" or "pckey" end
+function Instance:_liveKinds(exceptTupleKey)
+  local out = { quickkey = 0, pckey = 0, first = {} }
+  for _, h in pairs(self._holds) do
+    if h.kind ~= "text" and (h.state == "held" or h.state == "releasing" or h.state == "unresolved") and h.tupleKey ~= exceptTupleKey then
+      local kind = h.quickkey and "quickkey" or "pckey"
+      out[kind] = out[kind] + 1
+      if not out.first[kind] or h.seq < out.first[kind].seq then out.first[kind] = h end
+    end
+  end
+  return out
+end
+
+-- KB-15: the combinations whose console semantics are not qualified, refused before dispatch on every
+-- backend: a Quickey (an executor press) next to a PC key pressed through Keyboard() and the reverse, a
+-- combo mixing both (ctx.reserved), and a Quickey while a temporary shortcut-mode change (KB-14) is
+-- active. Returns the structured error or nil. The mode change while a Quickey is down is refused by
+-- _enterMode with the same code.
+function Instance:_mixError(tuple, ctx)
+  ctx = ctx or {}
+  local kind = tuple.quickkey and "quickkey" or "pckey"
+  local other = kind == "quickkey" and "pckey" or "quickkey"
+  local what = kind == "quickkey" and ("Quickey " .. tostring(tuple.quickkey)) or ("PC key " .. tostring(tuple.pcKey))
+  local otherName = other == "quickkey" and "Quickey" or "PC key"
+  if kind == "quickkey" then
+    local op = self._mode
+    if op and op.state == "active" then
+      local _, e = fail("unqualified-mix", string.format("%s refused: a temporary shortcut-mode change is active (mode %s: shortcuts %s for %s, session '%s'); pressing a Quickey while the operator's shortcut mode is changed is not qualified (KB-15), nothing is dispatched; wait for the restoration (%d ms after its last event) or release its holds",
+        what, op.id, op.target and "on" or "off", tostring(op.purpose), tostring(op.owner), self._config.modeRestoreDelayMs), { reason = "mode", mode = op.id, owner = op.owner, target = op.target })
+      return e
+    end
+  end
+  local live = self:_liveKinds(tupleKey(tuple))
+  if live[other] > 0 then
+    local h = live.first[other]
+    local _, e = fail("unqualified-mix", string.format("%s refused: %s %s (hold %s, session '%s') is %s; a Quickey pressed through an executor next to a PC key pressed through Keyboard() is not a qualified chord (KB-15), nothing is dispatched; release or recover it first",
+      what, otherName, tostring(h.logical or h.quickkey or h.pcKey), h.id, h.session, h.state), { reason = "held", hold = h.id, owner = h.session, state = h.state, heldKind = other })
+    return e
+  end
+  if type(ctx.reserved) == "table" then
+    for tk, index in pairs(ctx.reserved) do
+      if tupleKind(tk) == other then
+        local _, e = fail("unqualified-mix", string.format("%s refused: key %d of the combo is a %s; a combo cannot mix Quickeys and PC keys (KB-15), nothing is dispatched", what, index, otherName), { reason = "combo", key = index, heldKind = other })
+        return e
+      end
+    end
+  end
+  return nil
+end
+
 function Instance:_exclusiveHold()
   for _, h in pairs(self._holds) do
     if h.exclusive and h.state ~= "released" then return h end
   end
   return nil
+end
+
+-- Executors reserved by live records (held, releasing or unresolved) through their recorded target
+-- (KB-13): index -> hold id. The single source of truth for "in use"; a backend keeps no copy, so an
+-- adopted record from a previous run reserves its executor exactly like a fresh one.
+function Instance:_executorsInUse()
+  local out = {}
+  for _, h in pairs(self._holds) do
+    if h.state ~= "released" and type(h.target) == "table" and h.target.executor ~= nil then out[h.target.executor] = h.id end
+  end
+  return out
 end
 
 -- Turns a press spec into a stored tuple plus the route it was resolved by. Nothing is dispatched.
@@ -2227,14 +4707,45 @@ function Instance:_resolveSpec(spec, forPress)
       return nil, nil, { code = "bad-argument", message = "modifiers of a logical key come from its shortcut mapping; pass them only with pcKey" }
     end
     if spec.prefer ~= nil and type(spec.prefer) ~= "string" then return nil, nil, { code = "bad-argument", message = "prefer must be a PC key name (string)" } end
-    local r = self:describeKey(spec.key, { executor = spec.executor, prefer = spec.prefer })
-    if not r.supported then return nil, nil, { code = "unsupported", message = "logical key " .. tostring(spec.key) .. " is unsupported: " .. tostring(r.reason), resolution = r } end
-    -- Shortcut-backed keys need the table active; the fixed (MA) and native (PLEASE) routes do not.
-    if r.source == "shortcut-table" and r.shortcutsActive == false then
-      return nil, nil, { code = "unsupported", message = "logical key " .. r.key .. " routes through the shortcut table but keyboard shortcuts are inactive; the operator must enable them (never toggled here)", resolution = r }
+    -- The routing policy (KB-11) decides the method and the effective route before anything is
+    -- dispatched. A refused or unavailable route is an error with the full report; no other method
+    -- or backend is tried, now or later.
+    local rr = self:_route(spec.key, { executor = spec.executor, prefer = spec.prefer })
+    local r = rr.resolution
+    if not rr.supported then
+      return nil, nil, { code = "unsupported", message = "logical key " .. rr.key .. " (" .. rr.method .. ") is unsupported: " .. tostring(rr.reason), reason = rr.code, resolution = r, route = rr }
     end
-    if r.source == "shortcut-table" and r.shortcutsActive ~= true then
-      return nil, nil, { code = "unsupported", message = "logical key " .. r.key .. " routes through the shortcut table but shortcut enablement cannot be established (" .. tostring(r.shortcutsActiveError or "unreadable") .. "); refused rather than guessed", resolution = r }
+    if not rr.dispatchable then
+      return nil, nil, { code = "unavailable", message = "logical key " .. rr.key .. " (" .. rr.method .. ") selects the " .. tostring(rr.effective) .. " route, which cannot be dispatched: " .. table.concat(rr.unavailable, "; ") .. " (nothing dispatched; no other method is selected)",
+                         unavailable = rr.unavailable, effective = rr.effective, resolution = r, route = rr }
+    end
+    local snapshot = { method = rr.method, methodSource = rr.methodSource, quickkey = entryField(self._routing, rr.key, "quickkey"), prefer = rr.prefer, text = rr.text, textChars = rr.textChars }
+    if rr.effective == "text" then
+      -- KB-14 text route: no console key is owned; the record carries the text, the code points and the
+      -- mode the insertion needs (shortcuts off: already off, or temporarily disabled by a mode operation).
+      local cps, why = validateText(rr.text, self._config.maxTextChars)
+      if not cps then return nil, nil, { code = "unsupported", message = "logical key " .. rr.key .. " (" .. rr.method .. "): the text mapping is invalid: " .. tostring(why) } end
+      local profile
+      if type(self._deps.profileName) == "function" then local okP, pn = pcall(self._deps.profileName); if okP and pn ~= nil then profile = tostring(pn) end end
+      local tuple = { text = rr.text, textKey = rr.key, display = display }
+      local needActive
+      if rr.modeChange then needActive = rr.modeChange.target else needActive = rr.shortcutsActive end
+      local route = { logical = rr.key, source = "text", method = rr.method, methodSource = rr.methodSource, text = rr.text, textChars = #cps, codepoints = cps,
+                      modeChange = rr.modeChange, shortcutsActive = needActive, profile = profile,
+                      textSelectedBecause = rr.textSelectedBecause, routing = snapshot,
+                      focus = "best-effort: the characters go to whatever the console has focused (command line while shortcuts are off); focus is not observable from Lua, no Enter/Please is added" }
+      return tuple, route, nil
+    end
+    if rr.effective == "quickkey" then
+      if forPress and self._adapter and type(self._adapter.supportsQuickkey) == "function" then
+        local ok, supported, reason = pcall(self._adapter.supportsQuickkey, self._adapter, rr.quickkey)
+        if not ok then return nil, nil, { code = "unsupported", message = "backend Quickey check failed: " .. tostring(supported) } end
+        if not supported then return nil, nil, { code = "unsupported", message = tostring(reason or ("Quickey " .. rr.quickkey .. " is not supported by the backend")) } end
+      end
+      local tuple = { quickkey = rr.quickkey, quickkeyCode = rr.codeValue, display = display }
+      local route = { logical = rr.key, source = "quickkey", method = rr.method, methodSource = rr.methodSource, quickkey = rr.quickkey, codeValue = rr.codeValue,
+                      capabilities = rr.quickkeyCapabilities, routing = snapshot }
+      return tuple, route, nil
     end
     if forPress then
       local ok, err = self:_backendKeyCheck(r.pcKey)
@@ -2243,7 +4754,13 @@ function Instance:_resolveSpec(spec, forPress)
     local tuple = { pcKey = r.pcKey, shift = r.shift, ctrl = r.ctrl, alt = r.alt, numlock = spec.numlock and true or false, display = display }
     local route = { logical = r.key, source = r.source, shortcut = r.shortcut, rowIndex = r.rowIndex, executor = r.executor, profile = r.profile,
                     shortcutsActive = r.shortcutsActive, verify = r.verify, redirectChecked = r.redirectChecked, pcKeyValidated = r.pcKeyValidated,
-                    prefer = r.prefer }
+                    prefer = r.prefer, method = rr.method, methodSource = rr.methodSource, routing = snapshot }
+    if rr.modeChange then
+      -- The hold is dispatched and released in the temporarily enabled mode; route checks compare against
+      -- that state (the operator disabling shortcuts mid-hold is then a route change, as before).
+      route.modeChange = rr.modeChange
+      route.shortcutsActive = rr.modeChange.target
+    end
     return tuple, route, nil
   end
   if type(spec.pcKey) ~= "string" or spec.pcKey == "" then return nil, nil, { code = "bad-argument", message = "spec needs key (logical name) or pcKey (non-empty PC key name)" } end
@@ -2270,7 +4787,22 @@ end
 function Instance:_checkRoutes()
   local mismatches
   for _, h in pairs(self._holds) do
-    if h.state ~= "released" and h.logical and h.route and h.route.source ~= "raw" then
+    if h.state ~= "released" and h.logical and h.route and h.route.source == "quickkey" then
+      -- A Quickey hold rechecks the decision it was pressed with (route.routing), never the current
+      -- policy: changing the method or code for the key mid-hold does not touch this record.
+      local r = self:_route(h.logical, { executor = h.route.executor, prefer = h.route.prefer }, h.route.routing)
+      local why
+      if not r.supported then why = "no longer resolvable: " .. tostring(r.reason)
+      elseif r.codeValue ~= h.quickkeyCode then why = string.format("Quickey code %s is now value %s (was %s)", tostring(h.quickkey), tostring(r.codeValue), tostring(h.quickkeyCode)) end
+      if why then
+        h.routeMismatch = { detected = h.routeMismatch and h.routeMismatch.detected or self._lastServiced, reason = why, current = { quickkey = r.quickkey, supported = r.supported } }
+        mismatches = mismatches or {}
+        mismatches[#mismatches + 1] = { hold = h.id, logical = h.logical, original = { tupleKey = h.tupleKey, route = h.route }, mismatch = why }
+      elseif h.routeMismatch then
+        h.routeRestored = { previous = h.routeMismatch.reason }
+        h.routeMismatch = nil
+      end
+    elseif h.state ~= "released" and h.logical and h.route and h.route.source ~= "raw" and h.route.source ~= "text" and h.state ~= "retained" and h.state ~= "quarantined" then
       local r = self:describeKey(h.logical, { executor = h.route.executor, prefer = h.route.prefer })
       local why
       if not r.supported then why = "no longer resolvable: " .. tostring(r.reason)
@@ -2312,7 +4844,14 @@ function Instance:_newHold(s, tuple, route, now, deadline, deadlineReason)
   hold.tupleKey = tupleKey(tuple)
   hold.route = route
   hold.logical = route and route.logical or nil
-  hold.backend = self._adapter and self._adapter.name or "none"
+  -- KB-15: a mixed adapter names the part that presses this tuple, so the record is released, recovered
+  -- and adopted through that part whatever adapter is attached later.
+  if self._adapter and type(self._adapter.recordBackend) == "function" then
+    local ok, name = pcall(self._adapter.recordBackend, self._adapter, tuple)
+    hold.backend = (ok and type(name) == "string") and name or self._adapter.name
+  else
+    hold.backend = self._adapter and self._adapter.name or "none"
+  end
   hold.pressedAt = now
   hold.state = "held"
   hold.kind = "hold"
@@ -2326,6 +4865,9 @@ end
 function Instance:_dropHold(hold)
   self._holds[hold.id] = nil
   if self._byTuple[hold.tupleKey] == hold then self._byTuple[hold.tupleKey] = nil end
+  -- Terminal: a dropped record (refused press, nothing typed) may still be listed as a dependent of a
+  -- mode operation; it must never count as live there, or the mode would stay changed for ever.
+  hold.state = "dropped"
 end
 
 function Instance:_setDeadline(hold, at, reason)
@@ -2363,7 +4905,12 @@ function Instance:_attemptRelease(hold, now, reason)
   -- A record is only ever released through the backend that pressed it: a fake record must never
   -- become a real Keyboard() event, and a real hold cannot be "released" by the fake.
   local origin = hold.backend or "unknown"
-  if origin ~= self._adapter.name then
+  local served = origin == self._adapter.name
+  if not served and type(self._adapter.serves) == "function" then
+    local ok, yes = pcall(self._adapter.serves, self._adapter, origin)
+    served = ok and yes == true
+  end
+  if not served then
     attempt.ok, attempt.error = false, string.format("record originates from backend '%s' but the attached backend is '%s'; not dispatched (attach the originating backend to release it)", origin, self._adapter.name)
     hold.dispatch.release = { ok = false, at = now, error = attempt.error, reason = reason }
     self:_markUnresolved(hold, now, attempt.error)
@@ -2371,7 +4918,10 @@ function Instance:_attemptRelease(hold, now, reason)
     return attempt
   end
   hold.state = "releasing"
-  local ok, aOk, confirmed, err = pcall(self._adapter.release, self._adapter, copyTuple(hold))
+  self._now = now
+  -- The recorded target (KB-13: the executor the Quickey was pressed on) goes with the stored tuple;
+  -- adapters without targets ignore it.
+  local ok, aOk, confirmed, err = pcall(self._adapter.release, self._adapter, copyTuple(hold), hold.target)
   if not ok then
     attempt.ok, attempt.error = false, "release raised an error: " .. tostring(aOk)
   elseif aOk == false then
@@ -2403,6 +4953,14 @@ function Instance:_attemptRelease(hold, now, reason)
     attempt.state, attempt.outcome = "unresolved", "unresolved"
   end
   hold.dispatch.release.outcome = attempt.outcome
+  if hold.modeOp then self:_modeEvent(now) end
+  if hold.state == "released" and hold.modeOp and self._mode and self._mode.id == hold.modeOp and self._mode.state == "active" then
+    -- KB-14: the key is up, but the mode it was pressed in is still temporarily changed; the record is
+    -- retained (tuple freed, nothing to release) until service() restores the mode.
+    hold.state = "retained"
+    attempt.restoration = "pending"
+    return attempt
+  end
   if hold.state == "released" then
     -- Released records are kept only until their session is reported; they free their tuple now.
     self._released[#self._released + 1] = hold
@@ -2428,16 +4986,17 @@ function Instance:_releaseHolds(list, now, reason)
     if h.state == "held" or h.state == "unresolved" or h.state == "releasing" then
       out.attempted = out.attempted + 1
       local r = self:_attemptRelease(h, now, reason)
-      if h.state == "released" then out.released[#out.released + 1] = r else out.unresolved[#out.unresolved + 1] = r end
+      if h.state == "released" or h.state == "retained" then out.released[#out.released + 1] = r else out.unresolved[#out.unresolved + 1] = r end
     end
   end
   return out
 end
 
--- Ownership records that still matter: held, releasing or unresolved (released ones are history).
+-- Ownership records that still matter: held, releasing, unresolved or typing (released ones are history;
+-- retained and quarantined ones own no key any more, they wait for the mode restoration).
 function Instance:_liveCount()
   local n = 0
-  for _, h in pairs(self._holds) do if h.state ~= "released" then n = n + 1 end end
+  for _, h in pairs(self._holds) do if h.state ~= "released" and h.state ~= "retained" and h.state ~= "quarantined" then n = n + 1 end end
   return n
 end
 
@@ -2514,13 +5073,18 @@ end
 function Instance:_holdReport(h, now, extra)
   local r = {
     id = h.id, session = h.session, state = h.state, kind = h.kind,
-    logical = h.logical, pcKey = h.pcKey, shift = h.shift, ctrl = h.ctrl, alt = h.alt, numlock = h.numlock, display = h.display,
-    tupleKey = h.tupleKey, route = h.route, backend = h.backend, pressedAt = h.pressedAt, releasedAt = h.releasedAt,
+    logical = h.logical, pcKey = h.pcKey, quickkey = h.quickkey, quickkeyCode = h.quickkeyCode, shift = h.shift, ctrl = h.ctrl, alt = h.alt, numlock = h.numlock, display = h.display,
+    method = h.route and h.route.method or nil,
+    tupleKey = h.tupleKey, route = h.route, backend = h.backend, target = h.target, pressedAt = h.pressedAt, releasedAt = h.releasedAt,
     deadline = h.deadline, deadlineReason = h.deadlineReason,
     exclusive = h.exclusive or nil, group = h.group, groupIndex = h.groupIndex, interaction = h.interaction, sequence = h.sequence,
     dispatch = h.dispatch, unresolved = h.unresolved, routeMismatch = h.routeMismatch, observed = h.observed,
     observedReleasedAt = h.observedReleasedAt, adopted = h.adopted, routeRestored = h.routeRestored,
     readback = h.readback,
+    -- KB-14: the mode operation the record depends on, its restoration, and text-route progress.
+    modeOp = h.modeOp, restoration = h.restoration, quarantine = h.quarantine,
+    text = h.text and { text = h.text.text, chars = h.text.chars, typed = h.text.typed, outcome = h.text.outcome, code = h.text.code, error = h.text.error,
+                        uncertainChar = h.text.uncertainChar, readback = h.text.readback, focus = h.text.focus } or nil,
     -- Flat copies for consumers with a bounded JSON depth (the bridge caps nesting).
     pressReadback = h.dispatch and h.dispatch.press and h.dispatch.press.readback or nil,
     releaseReadback = h.dispatch and h.dispatch.release and h.dispatch.release.readback or nil,
@@ -2528,7 +5092,10 @@ function Instance:_holdReport(h, now, extra)
   -- Result semantics spelled out: what the press did, and where the release stands.
   local dp, dr = h.dispatch and h.dispatch.press, h.dispatch and h.dispatch.release
   r.pressOutcome = dp and (dp.ok and (dp.outcome or (dp.confirmed == true and "confirmed" or "dispatched")) or "failed") or (h.adopted and "adopted" or "none")
-  if h.state == "released" then r.releaseOutcome = dr and dr.outcome or (dr and dr.confirmed == true and "confirmed" or "dispatched")
+  if h.kind == "text" then r.releaseOutcome = "none"; r.releaseNote = "text route: inserted on press, nothing on release"
+  elseif h.state == "released" then r.releaseOutcome = dr and dr.outcome or (dr and dr.confirmed == true and "confirmed" or "dispatched")
+  elseif h.state == "retained" then r.releaseOutcome = dr and dr.outcome or "dispatched"; r.restoration = r.restoration or { state = "pending", mode = h.modeOp }
+  elseif h.state == "quarantined" then r.releaseOutcome = dr and dr.outcome or (h.kind == "text" and "none" or "dispatched"); r.restoration = { state = "unresolved", mode = h.modeOp }
   elseif h.state == "unresolved" then r.releaseOutcome = "unresolved"
   elseif h.state == "releasing" then r.releaseOutcome = "in-progress"
   elseif h.deadline then r.releaseOutcome = "scheduled"
@@ -2556,13 +5123,17 @@ local function new(opts)
     elseif type(v) ~= "number" or v <= 0 then error(NAME .. ".new: config." .. k .. " must be a positive number", 2) end
     config[k] = v
   end
+  local routing, rerr = validateRoutingPolicy(opts.routing, config.maxTextChars)
+  if not routing then error(NAME .. ".new: opts.routing: " .. tostring(rerr.message), 2) end
   local self = setmetatable({
-    _owner = opts.owner, _backend = backend, _deps = opts.deps or {}, _config = config,
+    _owner = opts.owner, _backend = backend, _deps = opts.deps or {}, _config = config, _routing = routing,
     _adapter = nil, _inputEnabled = false,
     _state = "created", _holds = {}, _byTuple = {}, _released = {}, _sessions = {}, _pendingExpired = {},
     _interactions = {}, _endedInteractions = {}, _interactionSeq = 0,
     _sequence = nil, _sequences = {}, _sequenceSeq = 0,
     _seq = 0, _pressCount = 0, _releaseAttempts = 0, _serviced = 0, _lastServiced = nil, _observed = nil,
+    _bank = nil,
+    _mode = nil, _lastMode = nil, _modeSeq = 0,  -- KB-14 temporary shortcut-mode operation
   }, Instance)
   return self
 end
@@ -2574,11 +5145,18 @@ local M = {
   GENERIC_VIRTUAL_KEYS = true,
   UNSUPPORTED_KEYS = { "MA1", "MA2" },
   new = new, consoleDeps = consoleDeps, resolve = resolve, parseShortcut = parseShortcut, tupleKey = tupleKey, validateText = validateText,
-  fakeBackend = fakeBackend, keyboardBackend = keyboardBackend,
+  fakeBackend = fakeBackend, keyboardBackend = keyboardBackend, quickeyBackend = quickeyBackend, mixedBackend = mixedBackend,
+  -- KB-11 routing policy
+  METHODS = { "quickkey", "shortcutOrType", "shortcut", "type" }, DEFAULT_METHOD = DEFAULT_METHOD,
+  validateRoutingPolicy = validateRoutingPolicy, adapterCapabilities = adapterCapabilities, textForbidden = textForbidden,
+  -- KB-12 Quickey bank
+  BANK_MARKER = BANK_MARKER, BANK_NAME_PREFIX = BANK_NAME_PREFIX, BANK_PLACEHOLDER = BANK_PLACEHOLDER, BANK_ALIASES = shallowCopy(BANK_ALIASES),
+  BANK_QUALIFIED = (function() local o = {} for k, v in pairs(BANK_QUALIFIED) do o[k] = shallowCopy(v) end return o end)(),
+  validateBankSpec = validateBankSpec, discoverBankCodes = discoverBankCodes, parseBankMarker = parseBankMarker, bankMarkerText = bankMarkerText, bankId = bankId,
   SEQUENCE_STEP_KINDS = { "tap", "press", "release", "combo", "text", "wait" },
   TEXT_CONTEXTS = { "command-line", "text-field" },
-  backends = { keyboard = BACKENDS.keyboard.name, fake = BACKENDS.fake.name },
-  KEYBOARD_LIMITATIONS = KEYBOARD_LIMITATIONS,
+  backends = { keyboard = BACKENDS.keyboard.name, fake = BACKENDS.fake.name, quickey = BACKENDS.quickey.name, mixed = BACKENDS.mixed.name },
+  KEYBOARD_LIMITATIONS = KEYBOARD_LIMITATIONS, QUICKEY_LIMITATIONS = QUICKEY_LIMITATIONS, MIXED_LIMITATIONS = MIXED_LIMITATIONS,
   DEFAULT_CONFIG = shallowCopy(DEFAULT_CONFIG),
 }
 
