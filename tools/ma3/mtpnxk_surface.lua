@@ -748,6 +748,9 @@ local function collectContext(now)
   if not ok then logerr("contextSnapshot raised: %s", tostring(snap)); return nil end
   local known = (snap.generationUnknown ~= true and snap.stale ~= true) and 1 or 0
   local msg = { t = "context", gen = state.gen, epoch = snap.epoch, known = known, cg = snap.generation, display = snap.display,
+                -- why the context is not known: the module's reason (a part unobserved, the selection identity
+                -- incomplete) or staleness; absent when known
+                why = (known == 0) and (snap.generationNote or (snap.stale and "stale observations") or "unknown") or nil,
                 pool = snap.identity and snap.identity.dataPool and snap.identity.dataPool.name or "?",
                 page = snap.executorPage and snap.executorPage.no or "?" }
   local e = snap.encoder
@@ -769,6 +772,7 @@ local function collectContext(now)
       msg.slots[#msg.slots + 1] = r
     end
     msg.sel = sl.value.selection and sl.value.selection.count or "?"
+    if sl.value.selection and sl.value.selection.identityComplete == false then msg.selIncomplete = 1 end
   else
     msg.slotsWhy = sl and (sl.reason or sl.error) or "not observed"
   end

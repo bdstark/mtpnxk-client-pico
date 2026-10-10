@@ -64,12 +64,12 @@ operate right now; the service keeps it as data (`Link.context`) and renders or 
 
 | Field | Meaning |
 | --- | --- |
-| `known` | `1` when every part was observed in this epoch; `0` otherwise, and then `cg` is absent (no generation is claimed, as the module does) |
-| `cg` | the module's binding generation for this plugin's spec (configured display and executors): it moves when an input's meaning changed (identity, bank/page/context, a slot's object, resolution, readout, channel function, layer or availability, the executor page, an executor's assignment, functions or target status, or any of these becoming unreadable), never for a value, level, activity or label alone. Comparable only within one `(gen, epoch)` |
+| `known` | `1` when every part was observed in this epoch and the selection identity is complete; `0` otherwise, and then `cg` is absent (no generation is claimed, as the module does) and `why` carries the module's reason |
+| `cg` | the module's binding generation for this plugin's spec (configured display and executors): it moves when an input's meaning changed (identity, bank/page/context, the selection's fixtures, a slot's object, resolution, readout, channel function, layer or availability, the executor page, an executor's assignment, functions or target status, or any of these becoming unreadable), never for a value, level, activity or label alone. Comparable only within one `(gen, epoch)` |
 | `display`, `pool`, `page` | the authoritative display (the plugin's `display=` argument, default 1; never another display), the data pool name, the executor page number (`"?"` when unknown) |
 | `enc` | `{bank, bankName, page, pageName, ctx, attr}` (1-based, `attr = 1` for the `Default` attribute-editing context) or `{why}` when that display's encoder bar is unavailable |
 | `slots[]` | per pool slot: `{n, kind}` plus, for `attribute`, `name, label, unit, readout, res, layer, cf` (channel function), `avail` (`no-selection | available | unavailable | mixed`), `val` (`none | value | empty | mixed | unavailable`) and `abs` when a programmer value exists; `kind = "other"` carries `ref` (phaser/editor slots, unsupported); `kind = "empty"` nothing |
-| `sel` / `slotsWhy` | the selection count the availability was judged on / why the slots are unavailable |
+| `sel` / `selIncomplete` / `slotsWhy` | the selection count / `1` when the module could not walk the whole selection identity (then `known = 0`) / why the slots are unavailable |
 | `ex[]` | per configured executor: `{n, empty, tgt, cls, name, kp, ku, fd, lvl, tok, act, rgba, why}`: `tgt = 0` for a Quickey object or an executor reserved by an owned Quickey bank (never a playback target), `lvl` the level of the **configured** fader function (`tok`), `act` `0/1/"?"` |
 
 Sent in the frame `cg`, `known` or `epoch` changes and with the full-state cadence (1000 ms) otherwise. The

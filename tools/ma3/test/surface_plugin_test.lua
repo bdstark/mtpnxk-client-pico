@@ -457,6 +457,23 @@ check("after a show change no generation is claimed until every part is observed
 local back
 for _ = 1, 30 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do if p.epoch == fbEpoch + 1 and p.known == 1 then back = p end end; if back then break end end
 check("the generation resumes in the new epoch", back and back.cg == G + 3, J(back))
+-- Review: a snapshot whose selection identity is incomplete is not known, with the module's reason carried.
+do
+  local inst = state.modules.feedback.instance
+  local real = inst.contextSnapshot
+  inst.contextSnapshot = function(self, spec, now, opts)
+    local snap = real(self, spec, now, opts)
+    snap.generation, snap.generationUnknown, snap.generationNote = nil, true, "no generation: the selection identity is incomplete (selection identity bounded to 512 of 600 fixtures)"
+    snap.slots = { available = true, value = { bank = {}, page = {}, selection = { count = 600, scanned = 8, identityComplete = false }, slots = {} } }
+    return snap
+  end
+  local m = state._collectContext(clock.t)
+  check("an incomplete selection identity is propagated as known=0 with the reason and selIncomplete", m.known == 0 and m.cg == nil and m.why:find("selection identity is incomplete") and m.selIncomplete == 1 and m.sel == 600, J(m))
+  local sent
+  for _ = 1, 3 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do if p.known == 0 then sent = p end end; if sent then break end end
+  check("the unknown context is sent in the frame it changes", sent and sent.why:find("incomplete"), J(sent))
+  inst.contextSnapshot = real
+end
 
 -------------------------------------------------------------------------------
 -- Keyboard backend and bench mode
