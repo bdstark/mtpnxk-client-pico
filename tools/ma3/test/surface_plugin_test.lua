@@ -115,6 +115,7 @@ local function run(file, name) local c = assert(loadfile(here .. "/../" .. file)
 local Main, Cleanup = run("mtpnxk_surface.lua", "mtpnxk_surface")
 run("gma3_mcp_hardkeys.lua", "gma3_mcp_hardkeys")
 run("gma3_mcp_feedback.lua", "gma3_mcp_feedback")
+run("gma3_mcp_control.lua", "gma3_mcp_control")
 local state = _G.__mtpnxk_surface
 
 local failures, passes = 0, 0
@@ -473,6 +474,141 @@ do
   for _ = 1, 3 do tickAlive(0.05); for _, p in ipairs(ofType(drain(), "context")) do if p.known == 0 then sent = p end end; if sent then break end end
   check("the unknown context is sent in the frame it changes", sent and sent.why:find("incomplete"), J(sent))
   inst.contextSnapshot = real
+end
+
+-------------------------------------------------------------------------------
+-- KB-18: continuous-control events (`ctl`) admitted by the vendored control module
+-------------------------------------------------------------------------------
+do
+  check("control=off is the default: the welcome says control 0 and ctl events are acknowledged control-disabled", (function()
+    reset(); push({ t = "hello", v = 1, id = "nxk-c0", gen = 1, nonce = "c0c0c0c0c0c0c0c0", surface = "nxk", fw = "0.1.0" }); tick()
+    local w = ofType(drain(), "welcome")[1]
+    if not (w and w.control == 0 and w.controlBackend == "off") then return false end
+    sid, seq = w.sid, 0
+    send({ t = "ctl", ev = 1, k = "rel", dev = "nxk", c = "Rotary1", es = 1, cg = 1, tgt = { slot = 1 }, dx = 1 }); tick()
+    local a = ofType(drain(), "ack")[1]
+    return a and a.ok == 0 and a.code == "control-disabled" end)())
+  check("control=bogus is refused", select(2, state._parseArgument("key=" .. KEYHEX .. " control=console")) ~= nil)
+  reset("key=" .. KEYHEX .. " input=fake control=fake")
+  check("control=fake enables the module on its fake backend", state.controlEnabled == true and state.controlMode == "fake" and state.modules.control.version == "0.1.0" and findLog("control enabled on the fake backend"), lastLog())
+  push({ t = "hello", v = 1, id = "nxk-c1", gen = 7, nonce = "c1c1c1c1c1c1c1c1", surface = "nxk", fw = "0.1.0" }); tick()
+  local w = ofType(drain(), "welcome")[1]
+  check("the welcome announces control 1 on the fake backend and the control session is open", w and w.control == 1 and w.controlBackend == "fake" and state.sessions[w.sid].controlOpen == true, J(w))
+  sid, seq = w.sid, 0
+  -- The stub console has no encoder bar: slots are unavailable. Stage a binding with slots and executors
+  -- through the feedback instance (the context message and the module see the same snapshot).
+  local inst = state.modules.feedback.instance
+  local real = inst.contextSnapshot
+  local gen = 5
+  inst.contextSnapshot = function(self, spec, t, opts)
+    local snap = real(self, spec, t, opts)
+    snap.generation, snap.generationUnknown, snap.generationNote, snap.stale, snap.notObserved = gen, nil, nil, nil, 0
+    snap.slots = { available = true, value = { bank = { index = 1, name = "Dimmer" }, page = { index = 1, name = "Dimmer" }, context = "Default", selection = { count = 1, fixtures = { 401 }, identityComplete = true }, slots = {
+      { slot = 1, kind = "attribute", ref = "Attribute 1 'Dimmer'", name = "Dimmer", layer = "Absolute", resolution = "Coarse", readout = "Percent", channelFunction = "Dimmer", availability = "available" },
+      { slot = 2, kind = "empty" } } } }
+    snap.executors = { { available = true, value = { executor = 201, page = 3, empty = false, playbackTarget = true, assigned = { addr = "Sequence 1" }, functions = { keyPress = "Go+", fader = "Master" }, level = { token = "FaderMaster", value = 0 } } } }
+    return snap
+  end
+  for _ = 1, 4 do tickAlive(0.05); drain() end
+  local function ctl(ev, k, extra)
+    local o = { t = "ctl", ev = ev, k = k, dev = "nxk", c = "Rotary1", es = extra.es, cg = extra.cg or gen, gs = extra.gs or 1, tgt = extra.tgt or { slot = 1 } }
+    for key, v in pairs(extra) do if key ~= "es" and key ~= "cg" and key ~= "gs" and key ~= "tgt" then o[key] = v end end
+    return o
+  end
+  local function ackOf() local a = ofType(drain(), "ack"); return a[#a] end
+  local bad = { { "bad kind", { t = "ctl", ev = 1, k = "wheel", dev = "nxk", c = "x", es = 1, tgt = { slot = 1 }, dx = 1 } },
+                { "bad target", ctl(1, "rel", { es = 1, tgt = { slot = 9 }, dx = 1 }) },
+                { "bad element", ctl(1, "abs", { es = 1, tgt = { ex = 201, el = "led" }, v = 0.5 }) },
+                { "zero delta", ctl(1, "rel", { es = 1, dx = 0 }) }, { "bad value", ctl(1, "abs", { es = 1, tgt = { ex = 201, el = "fader" }, v = 2 }) },
+                { "bad es", ctl(1, "rel", { es = 0, dx = 1 }) }, { "bad d", ctl(1, "btn", { es = 1, d = 2 }) } }
+  local rejectedBefore = state.counters.rejected
+  for _, b in ipairs(bad) do send(b[2]); tick() end
+  check("malformed ctl packets are rejected before the module, not acknowledged", state.counters.rejected == rejectedBefore + #bad and #ofType(drain(), "ack") == 0 and state.counters.ctl == 0, state.counters.rejected - rejectedBefore)
+  send(ctl(10, "rel", { es = 1, cg = 99, dx = 1 })); tick()
+  local a = ackOf()
+  check("a stale generation is refused with the current one in the ack", a and a.ok == 0 and a.code == "stale-generation" and a.cg == gen, J(a))
+  send(ctl(11, "rel", { es = 2, dx = 2 })); tick()
+  a = ackOf()
+  check("a relative event against the current generation is admitted (queued 1)", a and a.ok == 1 and a.queued == 1 and a.coalesced == nil, J(a))
+  send(ctl(12, "rel", { es = 3, dx = 1 })); send(ctl(13, "rel", { es = 4, dx = -1 })); tick()
+  local acks = ofType(drain(), "ack")
+  check("deltas of one gesture arriving in one frame coalesce (the earlier one was applied by the previous frame); the acks say so", #acks == 2 and acks[1].coalesced == nil and acks[1].queued == 1 and acks[2].coalesced == 1 and state.counters.ctlCoalesced == 1, J(acks))
+  send(ctl(13, "rel", { es = 4, dx = -1 })); tick()
+  a = ackOf()
+  check("a duplicate event id gets the original ack with dup", a and a.dup == 1 and a.ok == 1 and a.coalesced == 1, J(a))
+  send(ctl(14, "rel", { es = 8, dx = 1 })); tick()
+  a = ackOf()
+  check("a sequence gap is admitted and reported as loss", a and a.ok == 1 and a.lost == 3 and state.counters.ctlLost == 3, J(a))
+  send(ctl(15, "rel", { es = 6, dx = 1 })); tick()
+  a = ackOf()
+  check("an older unseen sequence number is out-of-order, never applied late", a and a.ok == 0 and a.code == "out-of-order", J(a))
+  local fake = state.modules.control.instance._adapter
+  check("the loop applied the intents through the fake backend, the merged pair as one (nothing reached the console)", #fake.intents >= 2 and fake.intents[1].kind == "relative" and fake.intents[1].delta == 2 and fake.intents[2].events == 2 and fake.intents[2].delta == 0 and state.counters.ctlApplied >= 2 and #keyboardCalls == 0, J(fake.intents))
+  -- Touch/button boundaries and their per-control event order.
+  send(ctl(20, "touch", { es = 1, d = 1, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 3 })); tick()
+  a = ackOf()
+  check("a touch down on a fader executor is admitted", a and a.ok == 1, J(a))
+  send(ctl(19, "touch", { es = 2, d = 0, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 3 })); tick()
+  a = ackOf()
+  check("a touch event with an older id than the newest processed for that control is superseded (nothing dispatched)", a and a.ok == 0 and a.code == "superseded", J(a))
+  send(ctl(21, "abs", { es = 3, v = 0.5, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 3 })); send(ctl(22, "abs", { es = 4, v = 0.7, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 3 })); tick()
+  acks = ofType(drain(), "ack")
+  check("positions of a stateless fader supersede the queued one", #acks == 2 and acks[1].ok == 1 and acks[2].superseded == 1, J(acks))
+  local cmdBefore = #keyboardCalls
+  check("a gesture down makes the plugin's control admission busy (the bridge's guard would refuse writers)", state.modules.control.instance:admission(clock.t) ~= nil)
+  send(ctl(23, "touch", { es = 5, d = 0, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 3 })); tick()
+  a = ackOf()
+  tick()  -- the loop services the module before it reads packets: the release is applied one frame later
+  check("the release is admitted as a boundary; the loop applies position then release", a and a.ok == 1 and a.boundary == 1 and fake.intents[#fake.intents].kind == "touch" and fake.intents[#fake.intents].down == false and fake.intents[#fake.intents - 1].value == 0.7, J(fake.intents))
+  -- A generation change: the next event with the old generation is refused; a touch held across it is rebound.
+  send(ctl(30, "touch", { es = 6, d = 1, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 4 })); tick(); drain()
+  gen = 6
+  for _ = 1, 3 do tickAlive(0.05); drain() end
+  send(ctl(31, "abs", { es = 7, v = 0.2, cg = 5, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 4 })); tick()
+  a = ackOf()
+  check("after the generation moved, motion with the old generation is refused", a and a.ok == 0 and a.code == "stale-generation" and a.cg == 6, J(a))
+  send(ctl(32, "abs", { es = 8, v = 0.2, cg = 6, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 4 })); tick()
+  a = ackOf()
+  check("motion with the new generation while the old touch is still down is admitted only after re-touching (the touch itself was not rebound by a queued drop here)", a and (a.ok == 1 or a.code == "gesture-rebound"), J(a))
+  send(ctl(33, "touch", { es = 9, d = 0, dev = "mtouch", c = "Strip1", tgt = { ex = 201, el = "fader" }, gs = 4 })); tick(); drain()
+  -- Another surface's gesture on the same target is a conflict.
+  push({ t = "hello", v = 1, id = "nxk-c2", gen = 8, nonce = "c2c2c2c2c2c2c2c2", surface = "nxk", fw = "0.1.0" }); tick()
+  local w2 = ofType(drain(), "welcome")[1]
+  send(ctl(40, "btn", { es = 10, d = 1 })); tick(); drain()
+  push(pkt({ t = "ctl", sid = w2.sid, seq = 1, ev = 1, k = "rel", dev = "other", c = "Rotary1", es = 1, cg = gen, gs = 1, tgt = { slot = 1 }, dx = 1 })); tick()
+  local a2 = ofType(drain(), "ack")[1]
+  check("a second session's motion on a target another session holds is a conflict naming the owner", a2 and a2.ok == 0 and a2.code == "conflict" and a2.owner == sid, J(a2))
+  push(pkt({ t = "bye", sid = w2.sid, seq = 2 })); tick(); drain()
+  -- Lease expiry ends the gesture through the backend; silence then forgets the session.
+  local n0 = #fake.intents
+  tick(2.5)
+  check("a lapsed lease ends the session's button through the backend (forced release, nothing applied late)", fake.intents[#fake.intents].kind == "button" and fake.intents[#fake.intents].down == false and fake.intents[#fake.intents].forced == true and findLog("control lease expired"), J(fake.intents[#fake.intents]))
+  -- The wheel message stays answered unsupported for older services.
+  tickAlive(0)
+  send({ t = "wheel", ev = 50, w = 1, dx = 3, bank = 0 }); tick()
+  a = ackOf()
+  check("the legacy wheel message is still acknowledged unsupported", a and a.ok == 0 and a.code == "unsupported", J(a))
+  -- Status prints the control line; bye closes the control session with its gestures.
+  send(ctl(51, "btn", { es = 11, d = 1 })); tick(); drain()
+  Main(nil, "status"); Cleanup()
+  check("status reports the control module and its gestures", findLog("control: enabled backend=fake") and findLog("control gesture .-: button on nxk/Rotary1"), lastLog())
+  send({ t = "bye" }); tick()
+  check("bye ends the session's gestures through the backend", fake.intents[#fake.intents].kind == "button" and fake.intents[#fake.intents].reason == "bye" and findLog("button on nxk/Rotary1 ended %(applied%)"), lastLog())
+  inst.contextSnapshot = real
+  -- An unresolved release (the backend raised) survives a cleanup and is adopted by the next control=fake start.
+  push({ t = "hello", v = 1, id = "nxk-c3", gen = 9, nonce = "c3c3c3c3c3c3c3c3", surface = "nxk", fw = "0.1.0" }); tick()
+  local w3 = ofType(drain(), "welcome")[1]
+  sid, seq = w3.sid, 0
+  inst.contextSnapshot = function(self, spec, t, opts) local snap = real(self, spec, t, opts); snap.generation, snap.generationUnknown, snap.notObserved, snap.stale = 7, nil, 0, nil
+    snap.executors = { { available = true, value = { executor = 201, page = 3, empty = false, playbackTarget = true, assigned = { addr = "Sequence 1" }, functions = { keyPress = "Go+", fader = "Master" }, level = { token = "FaderMaster", value = 0 } } } }; return snap end
+  for _ = 1, 3 do tickAlive(0.05); drain() end
+  send(ctl(60, "touch", { es = 1, d = 1, cg = 7, dev = "m3", c = "Strip1", tgt = { ex = 201, el = "fader" } })); tick(); drain()
+  state.modules.control.instance._adapter:raiseNext("touch", "Keyboard() raised")
+  Cleanup(); Cleanup()
+  check("a release the backend raised on is kept across the cleanup", state.running == false and state.controlUnresolved and #state.controlUnresolved == 1 and state.controlUnresolved[1].kind == "touch", J(state.controlUnresolved))
+  inst.contextSnapshot = real
+  reset("key=" .. KEYHEX .. " input=fake control=fake")
+  check("the next control=fake start adopts it; recover re-attempts it through the fake backend", findLog("adopted 1 unresolved release") and (function() Main(nil, "recover"); Cleanup(); return findLog("control recover: 1 resolved, 0 still unresolved") ~= nil end)(), lastLog())
 end
 
 -------------------------------------------------------------------------------

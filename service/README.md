@@ -57,7 +57,7 @@ Plugin "mtpnxk_surface" "key=<hex>"
   scripted tap run that prints ack round-trip percentiles and, when the plugin
   was started with `bench`, press-to-effect percentiles.
 
-`cargo test` runs the 36 unit tests, including a fake plugin that exercises the
+`cargo test` runs the 44 unit tests, including a fake plugin that exercises the
 link's retransmission, loss, freshness and re-pairing paths and 17 M-Touch /
 M-Play regressions against the documented captures. Operator setup and
 recovery: [docs/operator-guide.md](../docs/operator-guide.md); qualified

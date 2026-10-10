@@ -28,13 +28,30 @@ pub enum ToPlugin<'a> {
         k: &'a str,
         d: u8,
     },
-    Wheel {
+    /// KB-18: a continuous-control event. `k` is rel | abs | touch | btn; `es` the per-device event
+    /// sequence (gaps are packet loss the plugin reports, never replays); `cg` the binding generation the
+    /// event was produced against (absent only for a release); `gs` the gesture id.
+    Ctl {
         sid: &'a str,
         seq: u64,
         ev: u64,
-        w: u8,
-        dx: i32,
-        bank: u8,
+        k: &'a str,
+        dev: &'a str,
+        c: &'a str,
+        es: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cg: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        gs: Option<u64>,
+        tgt: CtlTarget,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        dx: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        v: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        d: Option<u8>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        fine: Option<u8>,
     },
     Hb {
         sid: &'a str,
@@ -45,6 +62,15 @@ pub enum ToPlugin<'a> {
         sid: &'a str,
         seq: u64,
     },
+}
+
+/// What a control event means on the console: an encoder slot of the bound display, or an element of
+/// a bound executor. Serialised as `{"slot":n}` or `{"ex":n,"el":"fader"}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(untagged)]
+pub enum CtlTarget {
+    Slot { slot: u8 },
+    Executor { ex: u32, el: &'static str },
 }
 
 /// A welcome's key report: sorted lists of surface key names.
@@ -80,6 +106,11 @@ pub enum FromPlugin {
         plugin: Option<String>,
         #[serde(default)]
         epoch: Option<u64>,
+        /// KB-18: 1 when the plugin admits `ctl` events (control=fake), with the backend's name.
+        #[serde(default)]
+        control: Option<u8>,
+        #[serde(default, rename = "controlBackend")]
+        control_backend: Option<String>,
         #[serde(default)]
         seq: u64,
     },
@@ -100,6 +131,14 @@ pub enum FromPlugin {
         noop: Option<u8>,
         #[serde(default)]
         duplicate: Option<u8>,
+        /// KB-18 fields of a `ctl` ack: loss the plugin reported for the event's device, whether the
+        /// delta was coalesced, the current binding generation on a stale-generation refusal.
+        #[serde(default)]
+        lost: Option<u64>,
+        #[serde(default)]
+        coalesced: Option<u8>,
+        #[serde(default)]
+        cg: Option<u64>,
     },
     Hb {
         sid: String,
@@ -254,5 +293,15 @@ mod tests {
         let k = ToPlugin::Key { sid: "s", seq: 2, ev: 7, k: "Record", d: 1 };
         let text = serde_json::to_string(&k).unwrap();
         assert!(text.contains(r#""t":"key""#) && text.contains(r#""ev":7"#));
+        let c = ToPlugin::Ctl { sid: "s", seq: 3, ev: 8, k: "rel", dev: "nxk", c: "Rotary1", es: 1, cg: Some(4), gs: Some(2), tgt: CtlTarget::Slot { slot: 1 }, dx: Some(-3), v: None, d: None, fine: Some(1) };
+        let text = serde_json::to_string(&c).unwrap();
+        assert!(text.contains(r#""t":"ctl""#) && text.contains(r#""tgt":{"slot":1}"#) && text.contains(r#""dx":-3"#) && !text.contains(r#""v""#), "{text}");
+        let t = ToPlugin::Ctl { sid: "s", seq: 4, ev: 9, k: "touch", dev: "mtouch", c: "Strip1", es: 2, cg: None, gs: Some(3), tgt: CtlTarget::Executor { ex: 201, el: "fader" }, dx: None, v: None, d: Some(0), fine: None };
+        let text = serde_json::to_string(&t).unwrap();
+        assert!(text.contains(r#""tgt":{"ex":201,"el":"fader"}"#) && text.contains(r#""d":0"#) && !text.contains(r#""cg""#), "{text}");
+        let a: FromPlugin = serde_json::from_str(r#"{"t":"ack","sid":"s","seq":5,"ev":8,"ok":1,"lost":2,"coalesced":1}"#).unwrap();
+        match a { FromPlugin::Ack { lost, coalesced, .. } => { assert_eq!(lost, Some(2)); assert_eq!(coalesced, Some(1)); } _ => panic!() }
+        let w: FromPlugin = serde_json::from_str(r#"{"t":"welcome","v":1,"sid":"a","nonce":"n","gen":"1-1","lease":2000,"hb":250,"control":1,"controlBackend":"fake","seq":0}"#).unwrap();
+        match w { FromPlugin::Welcome { control, control_backend, .. } => { assert_eq!(control, Some(1)); assert_eq!(control_backend.as_deref(), Some("fake")); } _ => panic!() }
     }
 }

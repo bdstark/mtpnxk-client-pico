@@ -68,6 +68,7 @@ local function run(file, name) local c = assert(loadfile(here .. "/../" .. file)
 local Main, Cleanup = run("mtpnxk_surface.lua", "mtpnxk_surface")
 run("gma3_mcp_hardkeys.lua", "gma3_mcp_hardkeys")
 run("gma3_mcp_feedback.lua", "gma3_mcp_feedback")
+run("gma3_mcp_control.lua", "gma3_mcp_control")
 local state = _G.__mtpnxk_surface
 state.sock = sock
 if not state._start(state._parseArgument(arg[1] or "")) then io.write("L start refused\n"); os.exit(1) end

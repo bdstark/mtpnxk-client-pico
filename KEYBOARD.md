@@ -1,6 +1,6 @@
-# KB-07, KB-08 and KB-15 in mtpnxk: the surface consumer and its qualification
+# KB-07, KB-08 and KB-15 to KB-18 in mtpnxk: the surface consumer and its qualification
 
-Updated: 2026-10-09 (KB-15 surface half added, see the last section). The feature series KB-01 to KB-09 is defined and tracked in
+Updated: 2026-10-10 (KB-18 surface half added, see the last section). The feature series KB-01 to KB-09 is defined and tracked in
 [bdstark/GrandMA3MCP `KEYBOARD.md`](https://github.com/bdstark/GrandMA3MCP/blob/main/KEYBOARD.md).
 KB-01 to KB-06 are complete there (macOS, onPC 2.5.1.0) and provide the reusable
 console modules this repository vendors. KB-07 (the surface consumer) and KB-08
@@ -257,3 +257,45 @@ unchanged on the keyboard path.
 **Not verified live in this repository:** the surface plugin against onPC with the 0.3.0 pair (the MCP repository's
 probe exercised the same module through the bridge); an encoder bar is only present on display 1 there, so the
 plugin's default `display=1` is the one that answers. Wiring the context into encoder bindings is KB-18/KB-19.
+
+## KB-18 — Continuous-control transport and admission (surface half, 2026-10-10)
+
+The module half is in the MCP repository (`gma3_mcp_control` 0.1.0, bridge 0.14.0, branch `feat/kb18-control-admission`,
+PR bdstark/GrandMA3MCP#22, live record `docs/probes/kb-18-control-macos-2.5.1.md` there, 30/30). This repository vendors the
+0.10.0/0.3.0/0.1.0 set unchanged from `1f75481` ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md)) and adds the surface side:
+
+- **protocol** ([docs/surface-protocol.md](docs/surface-protocol.md) section 3a): one `ctl` message for relative motion,
+  absolute positions, touches and buttons, each with device, control, the service's per-device sequence `es`, the binding
+  generation `cg` (the `context` message's), a gesture id and a target (`{slot}` or `{ex, el}`); the ack carries the
+  module's outcome (`lost`, `coalesced`, `superseded`, the current `cg` on a stale refusal). Motion is never retransmitted
+  (loss is reported by the plugin, never replayed); touches and buttons are retransmitted like keys and ordered per
+  control. The welcome says `control: 1|0`.
+- **`mtpnxk_surface.lua` 0.4.0:** the third vendored module is loaded with this plugin's cached context snapshot as the
+  binding (so the service's `cg` and the module's generation are one number) and its hardkeys instance as the other
+  input owner; a control session is opened, renewed, lapsed and reopened next to the hardkeys one; `ctl` packets are
+  validated, deduplicated on `ev`, ordered per control for touches/buttons and handed to `control:submit()`; the loop
+  services the module after feedback (4 intents per tick); lease lapse, `bye`, silence, `stop` and Cleanup end gestures
+  through the backend and drop queued motion; a release the backend raised on is kept and adopted by the next
+  `control=fake` start (`recover` re-attempts it); `status` prints the control line and its gestures. `control=fake|off`
+  is a start argument, off by default (then `ctl` is acknowledged `control-disabled`); KB-18 ships the fake backend only.
+- **Rust service** (`src/link.rs`, `cargo test` 44, eight new): the four rotaries are encoder slots 1–4 and a push is a
+  button; Bank held is the `fine` modifier. `control_event()` keeps per-device sequences and per-control gestures,
+  merges deltas and positions per control/generation/gesture, sends at most one motion packet per control per 5 ms
+  (16 per tick) and drops queued motion older than 250 ms, against a moved generation or when the link goes down; a
+  boundary flushes its control's motion first, is retransmitted, and a release supersedes an unacknowledged press.
+  Without a known context motion and downs are dropped (`ctl_unbound`); a plugin reporting `control: 0` gets none
+  (`ctl_unsupported`). The summary line prints the control counters; `sim` accepts `rot<n>:<delta>` and `btn<n>:down|up|tap`.
+
+Harness: 187 checks (26 new: default off and `control-disabled` acks, `control=fake` and the welcome flag, malformed `ctl`
+packets rejected before the module, stale generation with the current one in the ack, admission and coalescing with the
+acks saying so, duplicate ids, loss reporting, out-of-order, the fake backend's recorded intents, touch/button order,
+positions superseding, the busy descriptor, a generation change refusing old-generation motion, a second surface's
+conflict, lease lapse and `bye` ending gestures through the backend, the legacy `wheel` answer, `status`, a kept unresolved
+release adopted and recovered). `sh tools/ma3/test/e2e.sh` gains a control scenario: the real service's rotary deltas and
+push reach the real plugin as `ctl` events and are refused `target-unavailable` (the stub console has no encoder bar), with
+nothing lost and the counters as expected.
+
+**Not verified live in this repository:** the surface plugin and the NX-K rotaries against onPC with `control=fake` (the
+MCP repository's probe exercised the same module through the bridge, 30/30); the M-Touch strips are not wired into the link
+(touch and absolute events are exercised by the Rust and Lua harnesses only; KB-20). Nothing moves on the console in
+KB-18: the adjustment backend, calibration and the meaning of `fine` are KB-19.

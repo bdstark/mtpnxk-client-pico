@@ -1,4 +1,4 @@
-# Surface protocol and KB-07 design (2026-10-09, status updated by KB-08)
+# Surface protocol and KB-07 design (2026-10-09, status updated by KB-08; KB-17 context and KB-18 control events added 2026-10-10)
 
 How a surface service (the Rust process that owns the NX-K) and the
 `mtpnxk_surface` Lua plugin inside grandMA3 onPC talk to each other, what each
@@ -74,7 +74,8 @@ operate right now; the service keeps it as data (`Link.context`) and renders or 
 
 Sent in the frame `cg`, `known` or `epoch` changes and with the full-state cadence (1000 ms) otherwise. The
 welcome carries `context: 1` when the vendored module supports it. The plugin's `display=` argument names the
-authoritative encoder bar; it is not discovered.
+authoritative encoder bar; it is not discovered. Since KB-18 the service also binds to it: `cg` is the
+generation every control event carries (section 3a).
 
 ## 2. Pairing and packet semantics
 
@@ -136,6 +137,9 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
   is `{ ok: [...], unsupported: [...] }`, sorted surface key names; the reason
   for each unsupported key is in the plugin's log (`key X unsupported: …`).
   `welcome.input` is the plugin's input mode (`keyboard`, `fake` or `off`).
+- `welcome.control` is `1` when the plugin admits `ctl` events (started with
+  `control=fake`; `controlBackend` names the backend) and `0` otherwise, when
+  the service drops them locally (KB-18, section 3a).
 - A hello for an `id` with an open session closes that session first (its
   holds are released) and opens a new one: a restarted service never inherits
   holds. The `held` list in the hello is **informational**: those keys are
@@ -149,7 +153,8 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
   the last accepted `seq` and drops any packet with `seq` ≤ it. There is no
   reorder window: a reordered press/release pair collapses to nothing (a
   missed tap), never to a stuck key.
-- Events (`key`, `wheel`) carry an event id `ev`, monotonic per service start,
+- Events (`key`, `ctl`; `wheel` is the pre-KB-18 encoder message the plugin still
+  answers `unsupported`) carry an event id `ev`, monotonic per service start,
   independent of `seq`. A retransmission of an event is a new packet (new
   `seq`) carrying the same `ev`. The plugin deduplicates on `ev` with a window
   of the last 64 ids per session; a duplicate is answered with the **original**
@@ -162,7 +167,9 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
   first copy was lost cannot execute after its release was processed, and a
   stale release cannot end a newer press. The service also stops
   retransmitting a press once it sends that key's release (counted
-  `superseded`); the tap is lost, never late.
+  `superseded`); the tap is lost, never late. A `ctl` touch or button is
+  ordered the same way per control (`dev`/`c`); `ctl` motion is ordered by
+  the plugin's per-device sequence `es` instead (section 3a).
 - The plugin answers every `key` and `wheel` with
   `ack { t:"ack", sid, seq, ev, ok:0|1, code?, why?, hold? }`. `ok:1` means the
   event was dispatched to the module (for a press: the hold exists and the
@@ -172,8 +179,10 @@ plugin  → service  welcome { t:"welcome", v:1, sid, nonce, gen, lease, hb, key
   `route-changed`, `capacity`, …).
 - The service retransmits an unacknowledged `key` event up to 4 times at 60 ms
   spacing (the measured ack round trip on onPC is 34 ms median, 53 ms p99), then
-  drops it and counts it as lost. `wheel` events are never
-  retransmitted (a stale wheel delta is worse than a lost one).
+  drops it and counts it as lost. `ctl` motion (`rel`, `abs`) is never
+  retransmitted (a stale delta is worse than a lost one; the plugin reports
+  the gap as `lost` in the next ack); `ctl` touches and buttons are
+  retransmitted like keys.
 - Everything else (`hb`, `state`, `err`) is unacknowledged.
 
 ### Heartbeat, lease and expiry
@@ -199,8 +208,12 @@ A datagram is rejected, counted and (where a session exists) answered with
 does not verify; the JSON does not parse to an object; `t` is unknown; `sid`
 is unknown; `seq` is not an increasing integer; a `key` has no known `k` or
 `d` not in {0, 1}; a `wheel` has `w` outside 1..4 or `dx` outside −127..127;
+a `ctl` has `k` outside {rel, abs, touch, btn}, `dev` or `c` empty or longer
+than 32, `es` not a positive integer, `cg`/`gs` not integers, `fine` not in
+{0, 1}, `tgt` neither `{slot: 1..8}` nor `{ex: n, el: fader|key|encoder}`,
+`dx` zero or outside ±4096, `v` outside 0..1 or `d` not in {0, 1};
 `held` is not a list of strings or longer than 16. Only a packet that passes
-every check reaches `hardkeys`/`feedback`.
+every check reaches `hardkeys`/`feedback`/`control`.
 
 ## 3. Events versus held-key reconciliation
 
@@ -248,6 +261,43 @@ every check reaches `hardkeys`/`feedback`.
 - Capacity: the hardkeys instance allows 12 simultaneous holds; the 13th press
   is acknowledged `ok:0, code:"capacity"` and nothing is dispatched.
 
+### 3a. Continuous-control events (`ctl`, KB-18)
+
+```
+service → plugin   ctl { t:"ctl", sid, seq, ev, k, dev, c, es, cg?, gs?, tgt, dx? | v? | d?, fine? }
+plugin  → service  ack { t:"ack", sid, seq, ev, ok, code?, why?, cg?, lost?, coalesced?, superseded?, queued?, boundary?, noop?, dup? }
+```
+
+| Field | Meaning |
+| --- | --- |
+| `k` | `rel` (encoder motion, `dx` detents), `abs` (a strip or fader position, `v` in 0..1), `touch` or `btn` (`d` 1 down, 0 up) |
+| `dev`, `c` | the device (`nxk`, `mtouch`, ...) and its control (`Rotary1`, `Strip3`, ...) |
+| `es` | the service's event sequence per device, one per packet sent (a merged burst is one); the plugin refuses a repeated one (`duplicate`) and an older unseen one (`out-of-order`, never applied late) and accepts a gap as packet loss, reported back as `lost` |
+| `cg` | the binding generation the event was produced against: the `cg` of the last known `context` message. Required for motion and downs; absent on a release. The plugin refuses a stale one (`stale-generation`, the current `cg` in the ack) and anything while it claims no generation (`binding-unknown`) |
+| `gs` | the gesture id: new on every touch down and button, and for untouched rotaries after 300 ms idle. The plugin coalesces deltas only within one gesture |
+| `tgt` | `{slot: n}` (encoder slot n of the bound display) or `{ex: n, el: fader\|key\|encoder}` (an element of a bound executor); the NX-K rotaries 1–4 are slots 1–4 |
+| `fine` | the surface's explicit fine modifier (Bank held on the NX-K); what it means on the console is KB-19's |
+
+The service (`src/link.rs`) queues motion and merges it before sending: deltas of one control, generation and
+gesture add up, a newer position replaces the queued one, and at most one motion packet per control goes out every
+5 ms (16 per tick). Queued motion older than 250 ms, or whose generation is no longer the current `cg`, or that is
+still queued when the link goes down, is dropped and counted, never sent late. A touch or button is a **boundary**:
+the control's queued motion goes out first, then the boundary, retransmitted like a key; a release stops the
+retransmission of the press it ends. Without a known context (no `context` with `known: 1` in this pairing within
+1.5 s) motion and downs are dropped (`ctl_unbound`); releases always go out. A plugin that reports `control: 0`
+gets no `ctl` packets at all (`ctl_unsupported`).
+
+The plugin maps the packet onto the vendored `gma3_mcp_control` module's event and acknowledges its outcome: the
+module's admission (session lease, order, rate, binding, target, ownership, bounds), its coalescing (within one
+session, device, control, target, generation, resolution, fine flag and gesture, never across a boundary), its
+absolute supersession rule (stateless functions only) and the busy descriptor are the MCP repository's
+(`docs/modules.md` there, "Continuous-control admission"). Its `service()` runs after the hardkeys and feedback
+services every tick and applies at most 4 intents through the backend; KB-18 ships the **fake backend only**
+(`control=fake`: intents recorded, nothing moves on the console). A session's lease lapse, `bye`, silence or the
+plugin's stop ends its gestures through the backend and drops queued motion; a release the backend raised on is
+kept across restarts for `Plugin "mtpnxk_surface" "recover"`. The plugin's and the bridge's control instances do not
+arbitrate with each other (section 6 applies).
+
 ## 4. Loop budget
 
 The plugin loop runs inside the `Plugin` call and yields once per console
@@ -260,6 +310,8 @@ onPC). Per iteration, in this order:
    reads (`maxReadsPerService`), round robin, each item at most every 100 ms.
    The NX-K watch list has 9 items, so a full pass takes 3 frames and
    feedback never costs a frame more than 4 reads.
+   Then `control:service(now)` (KB-18): lease and gesture expiries, then at
+   most 4 queued intents through the backend.
 3. Receive up to 32 datagrams (`receivefrom` with timeout 0), validate each
    (section 2) and dispatch. The rest wait in the socket buffer; the OS drops
    when it is full. Per session at most 400 packets/s are processed; beyond
@@ -330,7 +382,8 @@ user profile's shortcut table; unresolved keys are reported in
 | `Clear` | `CLEAR` | shortcut `Delete` |
 | `Undo` | `OOPS` | shortcut `Backspace` |
 | `Update`, `Edit`, `Copy`, `Move`, `Delete`, `Load`, `Cue`, `Group`, `Macro`, `Fade`, `Delay`, `HighLight`, `Preview`, `Next`, `Last`, `Menu`, `Snap Shot`, `Thru`, `Full`, `@`, `+`, `-`, `.`, `/`, `Back` | the `Enums.VirtualKeyCode` name in the plugin's table (`UPDATE`, `EDIT`, … `PREV` for Last, `SNAPSHOT`, `THRU`, `FULL`, `AT`, `PLUS`, `MINUS`, `DOT`, `SLASH`, `BACKSPACE`) | **unverified**: resolved through the shortcut table if the profile maps them; otherwise reported unsupported. The names are checked against the console's enum at start; a wrong name is reported, never guessed. |
-| `Bank`, `Rotary1`–`Rotary4` (turn and press), `Swap Prog`, `Link` | none | wheels are carried as `wheel` events and acknowledged `unsupported` until a verified Lua route for encoder input exists; Bank is the service's wheel modifier; Link is the link LED |
+| `Rotary1`–`Rotary4` (turn and press) | encoder slots 1–4 of the bound display (`ctl` events, section 3a) | since KB-18 admitted by the vendored control module against the binding generation; the fake backend records them and nothing moves on the console until KB-19 |
+| `Bank`, `Swap Prog`, `Link` | none | Bank is the `fine` modifier of the rotaries (held) and otherwise unsupported as a key; Link is the link LED; the pre-KB-18 `wheel` message is still answered `unsupported` |
 
 Hardkeys 0.5.0 resolves any `Enums.VirtualKeyCode` name through the shortcut
 table (the fixed `MA` and native `PLEASE` routes stay special), and lets the
