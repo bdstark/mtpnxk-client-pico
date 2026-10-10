@@ -298,7 +298,56 @@ release adopted and recovered). `sh tools/ma3/test/e2e.sh` gains a control scena
 push reach the real plugin as `ctl` events and are refused `target-unavailable` (the stub console has no encoder bar), with
 nothing lost and the counters as expected.
 
-**Not verified live in this repository:** the surface plugin and the NX-K rotaries against onPC with `control=fake` (the
+**Not verified live in this repository (at KB-18):** the surface plugin and the NX-K rotaries against onPC with `control=fake` (the
 MCP repository's probe exercised the same module through the bridge, 30/30); the M-Touch strips are not wired into the link
 (touch and absolute events are exercised by the Rust and Lua harnesses only; KB-20). Nothing moves on the console in
-KB-18: the adjustment backend, calibration and the meaning of `fine` are KB-19.
+KB-18: the adjustment backend, calibration and the meaning of `fine` are KB-19 (below).
+
+## KB-19 — NX-K encoders follow the active encoder context (surface half, 2026-10-10)
+
+The console half is in the MCP repository (`gma3_mcp_control` 0.2.0 with the **console adjustment backend**,
+`gma3_mcp_feedback` 0.4.0 with each slot's physical range, bridge 0.15.0 `control=console`, branch
+`feat/kb19-adjustment-backend`, PR bdstark/GrandMA3MCP#23, live record `docs/probes/kb-19-adjust-macos-2.5.1.md` there,
+39/39). This repository vendors the 0.10.0/0.4.0/0.2.0 set unchanged from `874e7bd` ([tools/ma3/VENDOR.md](tools/ma3/VENDOR.md))
+and adds the surface side:
+
+- **Slots, not attribute names:** rotary n is encoder slot n of the bound display (section 3a); the vendored backend
+  applies `Attribute "<name>" At +/- <detents x step>` for whatever the plugin's own context snapshot says slot n holds
+  (name, layer, resolution, readout, channel function, physical range). The surface never names an attribute.
+- **Calibration:** one NX-K detent is one console encoder click: Percent/PercentFine readouts 1 at Coarse, Physical
+  readouts (Pan, Tilt, gobo and colour wheels) the attribute's range / 120 in physical units, Fine a tenth (the manual's
+  encoder-resolution rule, measured live in the MCP repository: Dimmer `At + 1`, Pan `At + 15` for four detents).
+  **No acceleration** is applied in the service or the plugin: the NX-K's own delta per report is the detent count (the
+  summary line's `max_detent` shows the largest single-event delta the device reported, so device-side acceleration, if
+  any firmware does it, is visible rather than compounded).
+- **Fine gesture:** Bank held sends `fine`; the backend divides the click by 10. It is an explicitly smaller step, not
+  the console's own resolution toggle.
+- **Pushes separate from rotation:** a rotary push is a `button` event and the console backend refuses it `unsupported`
+  at admission (calculator / open / select is not qualified; nothing is pressed, nothing owned). Strip touches and
+  positions are refused the same way (KB-20).
+- **Unavailable slots:** the plugin acknowledges `target-unavailable` with the binding's reason (no selection,
+  unavailable for the selection, empty slot) or `unsupported` (phaser/editor slot, unqualified readout/resolution/layer/
+  channel function, unreadable range); the service counts them (`refused`) and prints the reason with `--verbose`.
+  A `mixed` slot (some selected fixtures lack the attribute) is admitted: the console moves the fixtures that have it.
+- **Fifth slot / outer ring:** `--rotary-slots <base>` (1 by default) is the explicit, documented window: `2` maps the
+  rotaries to slots 2-5, so a page's fifth pool slot is reachable; the outer ring (dual-encoder function) is reported by
+  the context and refused, never silently mapped. Nothing is discarded silently.
+- **Context changes:** queued motion against a moved generation is dropped by the service (250 ms / generation rules of
+  KB-18) and by the plugin's loop; the next fresh gesture uses the new binding.
+- **`mtpnxk_surface.lua` 0.5.0:** `control=console` next to `control=fake|off` attaches the vendored
+  `consoleBackend(consoleDeps(_G))` (`Cmd` is the only console API it uses); `recover` attaches the backend of the
+  configured mode; the welcome says `controlBackend: console`; `status` names it.
+- **Rust service** (`cargo test` 46): `--rotary-slots`, the slot-window mapping and the `max_detent` counter.
+
+Harness: `lua tools/ma3/test/surface_plugin_test.lua` 195 checks (8 new: `control=console` enabling the vendored backend,
+the welcome flag, two detents applied as `Attribute "Dimmer" At + 2` through the stub console's `Cmd`, three fine
+detents `At - 0.3`, four detents on a Physical slot `Attribute "Pan" At + 15`, a push and a strip position refused
+`unsupported`, `status`); `cargo test` 46; `sh tools/ma3/test/e2e.sh` unchanged (the stub console has no encoder bar).
+
+**Verified live in this repository:** see [docs/probes/kb-19-surface-macos-2.5.1.md](docs/probes/kb-19-surface-macos-2.5.1.md)
+(the surface plugin on onPC with `control=console`, driven by the real service's `sim` rotary script, the console's
+programmer value read back through the MCP bridge).
+
+**Not verified live:** the physical NX-K rotaries (the `sim` path exercises the same service code from the decoder
+onward; the operator qualification with the device in hand is KB-24's), two surfaces on one slot, Windows/Linux hosts,
+M-Touch strips (KB-20).
